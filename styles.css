@@ -315,6 +315,44 @@ main {
 }
 .sku-name { font-weight: 500; }
 
+.market-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 14px;
+  flex-wrap: wrap;
+}
+.market-label {
+  font-size: 11.5px;
+  color: var(--text-3);
+  letter-spacing: 0.5px;
+  font-weight: 500;
+  margin-right: 4px;
+}
+.market-btns { display: flex; gap: 6px; flex-wrap: wrap; }
+.market-btn {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 5px 12px;
+  border-radius: 14px;
+  font-size: 12px;
+  cursor: pointer;
+  font-family: inherit;
+  transition: all var(--transition);
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.market-btn:hover { border-color: var(--accent); background: #fff; }
+.market-btn.active {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+  box-shadow: 0 2px 6px rgba(255,107,53,0.25);
+}
+.m-flag { font-size: 13px; line-height: 1; }
+
 .preview-row {
   display: flex;
   align-items: center;
@@ -558,8 +596,8 @@ main {
 .sb-thumb img { width: 100%; height: 100%; object-fit: cover; }
 .sb-thumb.pending {
   border-style: dashed;
-  border-color: #ffd9c0;
-  background: #fff;
+  border-color: #c8c8d0;
+  background: #e8e8ec;
 }
 .sb-thumb.running {
   border-color: #ff6b35;
@@ -1056,6 +1094,130 @@ main {
   z-index: 1000;
 }
 .toast.show { transform: translateX(-50%) translateY(0); opacity: 1; }
+
+/* History */
+#history-panel { margin-bottom: 16px; }
+.history-list { display: flex; flex-direction: column; gap: 8px; }
+.history-empty { color: var(--text-3); font-size: 13px; padding: 12px 0; text-align: center; }
+.history-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+.history-item:hover { background: var(--accent-2); border-color: var(--accent); }
+.history-thumb {
+  width: 44px;
+  height: 44px;
+  border-radius: 8px;
+  background-size: cover;
+  background-position: center;
+  background-color: #e8e8ec;
+  flex-shrink: 0;
+}
+.history-info { flex: 1; min-width: 0; }
+.history-title { font-size: 13.5px; font-weight: 600; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.history-meta { font-size: 11.5px; color: var(--text-3); margin-top: 2px; }
+.history-actions { display: flex; align-items: center; gap: 6px; }
+.history-restore {
+  padding: 5px 14px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: #fff;
+  font-size: 12px;
+  color: var(--text-2);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.history-restore:hover { background: var(--accent); color: #fff; border-color: var(--accent); }
+.history-delete {
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  background: transparent;
+  font-size: 16px;
+  color: #ccc;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+  transition: all 0.15s;
+}
+.history-delete:hover { color: #e74c3c; background: #fdeaea; }
+
+/* Lightbox */
+#lightbox {
+  position: fixed;
+  inset: 0;
+  z-index: 2000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.lb-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0,0,0,0.78);
+  backdrop-filter: blur(4px);
+}
+.lb-content {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+  padding: 20px;
+  max-width: 90vw;
+  max-height: 90vh;
+}
+.lb-close {
+  position: absolute;
+  top: -48px;
+  right: 0;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  border: none;
+  background: rgba(255,255,255,0.15);
+  color: #fff;
+  font-size: 22px;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.2s;
+}
+.lb-close:hover { background: rgba(255,255,255,0.3); }
+.lb-image-wrap {
+  background: #fff;
+  border-radius: 12px;
+  padding: 8px;
+  box-shadow: 0 20px 60px rgba(0,0,0,0.35);
+  max-width: 800px;
+  max-height: 70vh;
+  overflow: hidden;
+}
+.lb-image-wrap img {
+  max-width: 100%;
+  max-height: 70vh;
+  object-fit: contain;
+  display: block;
+  border-radius: 8px;
+}
+.lb-label {
+  color: rgba(255,255,255,0.8);
+  font-size: 13px;
+  letter-spacing: 1px;
+}
 
 @media (max-width: 900px) {
   .result-grid { grid-template-columns: 1fr; }

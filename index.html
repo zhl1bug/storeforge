@@ -32,6 +32,17 @@
 
 <main>
 
+  <!-- History Panel -->
+  <section id="history-panel" class="panel">
+    <h2 class="panel-title">
+      <span class="step-num">H</span>历史记录
+      <span class="panel-sub">点击可查看之前的生成结果</span>
+    </h2>
+    <div class="history-list" id="history-list">
+      <div class="history-empty">暂无历史记录</div>
+    </div>
+  </section>
+
   <!-- Step 1: Input -->
   <section id="step-input" class="panel">
     <h2 class="panel-title">
@@ -80,6 +91,17 @@
       </button>
     </div>
 
+    <div class="market-row">
+      <span class="market-label">目标市场</span>
+      <div class="market-btns">
+        <button class="market-btn active" data-market="cn"><span class="m-flag">🇨🇳</span> 中国</button>
+        <button class="market-btn" data-market="us"><span class="m-flag">🇺🇸</span> 美国</button>
+        <button class="market-btn" data-market="sea"><span class="m-flag">🌏</span> 东南亚</button>
+        <button class="market-btn" data-market="eu"><span class="m-flag">🇪🇺</span> 欧洲</button>
+        <button class="market-btn" data-market="ru"><span class="m-flag">🇷🇺</span> 俄罗斯</button>
+      </div>
+    </div>
+
     <div class="preview-row" id="preview-row" style="display:none">
       <img id="preview-img" alt="预览">
       <div class="preview-meta">
@@ -124,7 +146,7 @@
       <div class="pipe-step" data-step="2">
         <div class="pipe-circle"><span class="pipe-circle-num">3</span></div>
         <div class="pipe-name">多场景渲染</div>
-        <div class="pipe-desc">主图 / 场景 / 细节 / 变体</div>
+        <div class="pipe-desc">主图 / 场景 / 细节</div>
         <div class="pipe-progress"><div class="pipe-bar"></div></div>
       </div>
       <div class="pipe-step" data-step="3">
@@ -148,7 +170,6 @@
         </div>
       </div>
       <div class="sb-right">
-        <div class="sb-thumbs" id="sb-thumbs"></div>
         <div class="sb-count" id="sb-count">0/5</div>
       </div>
     </div>
@@ -208,7 +229,6 @@
           <button class="tab-btn active" data-tab="main">主图<span class="count">5</span></button>
           <button class="tab-btn" data-tab="scene">场景图<span class="count">3</span></button>
           <button class="tab-btn" data-tab="detail">细节图<span class="count">2</span></button>
-          <button class="tab-btn" data-tab="variant">变体图<span class="count">2</span></button>
         </div>
         <div class="asset-grid" id="asset-grid"></div>
       </div>
@@ -315,7 +335,6 @@
               <label class="checkbox"><input type="checkbox" class="sec-toggle" data-section="annotation" checked> 细节标注</label>
               <label class="checkbox"><input type="checkbox" class="sec-toggle" data-section="specs" checked> 规格表</label>
               <label class="checkbox"><input type="checkbox" class="sec-toggle" data-section="reviews" checked> 用户好评</label>
-              <label class="checkbox"><input type="checkbox" class="sec-toggle" data-section="variants" checked> 配色款式</label>
               <label class="checkbox"><input type="checkbox" class="sec-toggle" data-section="trust" checked> 服务保障</label>
             </div>
           </div>
@@ -327,10 +346,11 @@
     <div class="publish-bar">
       <div class="publish-info">
         <div class="publish-title"><span class="check">✓</span>已完成</div>
-        <div class="publish-sub">耗时 <b id="elapsed">04:47</b> · 共 12 张素材</div>
+        <div class="publish-sub">耗时 <b id="elapsed">04:47</b> · 共 11 张素材</div>
       </div>
       <div class="publish-actions">
         <button class="cta-btn" id="download-all-btn">下载全套 ZIP</button>
+        <!-- 平台按钮由 JS 根据市场动态渲染 -->
         <button class="platform-btn" data-platform="taobao">同步淘宝</button>
         <button class="platform-btn" data-platform="jd">同步京东</button>
         <button class="platform-btn" data-platform="douyin">同步抖音</button>

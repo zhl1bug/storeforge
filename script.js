@@ -36,10 +36,10 @@ const state = {
     annotation: true,
     specs: true,
     reviews: true,
-    variants: true,
     trust: true,
   },
   mode: 'real',           // 'mock' | 'real'  — 真实模式调 Tripo / Z-Image
+  market: 'cn',           // 'cn' | 'us' | 'sea' | 'eu' | 'ru'
   realModelUrl: null,     // Tripo 返回的 GLB URL
   realAssets: {},         // 'category-idx' => image URL
   realHeroImage: null,    // 详情图 hero 用的 真实图
@@ -50,6 +50,317 @@ const state = {
   isUploadedImage: false,  // 是否用户上传了图片(而非选择样本)
   threeRendersReady: false, // 3D 模型渲染是否已完成(为 false 时套图显示 loading)
 };
+
+// ============ History ============
+const HISTORY_KEY = 'yjt_history_v1';
+const MAX_HISTORY = 20;
+
+function loadHistory() {
+  try {
+    return JSON.parse(localStorage.getItem(HISTORY_KEY) || '[]');
+  } catch { return []; }
+}
+
+async function saveToHistory() {
+  const recordId = Date.now();
+
+  // 先把图片下载到服务端本地
+  const imagesToSave = {};
+  for (const [slot, url] of Object.entries(state.realAssets)) {
+    if (url && !url.startsWith("/history/")) imagesToSave[slot] = url;
+  }
+  if (state.realHeroImage && !state.realHeroImage.startsWith("/history/")) {
+    imagesToSave.hero = state.realHeroImage;
+  }
+
+  let localAssets = {};
+  let localModelUrl = null;
+
+  if (Object.keys(imagesToSave).length > 0 || state.realModelUrl) {
+    try {
+      const r = await fetch("/api/history/save", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          recordId,
+          images: imagesToSave,
+          modelUrl: state.realModelUrl,
+        }),
+      });
+      const data = await r.json();
+      if (data.ok) {
+        localAssets = data.saved || {};
+        localModelUrl = data.modelSaved || null;
+      }
+    } catch (err) {
+      console.warn("[saveToHistory] download failed:", err);
+    }
+  }
+
+  // 保存到 localStorage（存本地路径，优先使用）
+  const history = loadHistory();
+  const record = {
+    id: recordId,
+    timestamp: Date.now(),
+    title: state.edits.title || "未命名商品",
+    productType: state.productType,
+    uploadedImageBase64: state.uploadedImageBase64 || null,
+    realAssets: { ...state.realAssets },
+    realModelUrl: state.realModelUrl || null,
+    realHeroImage: state.realHeroImage || null,
+    localAssets,
+    localModelUrl,
+    edits: JSON.parse(JSON.stringify(state.edits)),
+    template: state.template,
+    color: state.color,
+    detailSections: { ...state.detailSections },
+    isUploadedImage: state.isUploadedImage,
+    market: state.market || "cn",
+  };
+  history.unshift(record);
+  if (history.length > MAX_HISTORY) history.length = MAX_HISTORY;
+  localStorage.setItem(HISTORY_KEY, JSON.stringify(history));
+  renderHistoryList();
+}
+
+
+function restoreHistory(record) {
+  if (!record) return;
+  // 恢复状态
+  state.productType = record.productType || 'generic';
+  state.color = record.color || '#333333';
+  state.template = record.template || 'minimal';
+  state.edits = JSON.parse(JSON.stringify(record.edits));
+  state.detailSections = { ...record.detailSections };
+  // 优先使用本地保存的路径（不会过期），fallback 到远程 URL
+  state.realAssets = { ...record.realAssets };
+  if (record.localAssets) {
+    for (const [slot, localPath] of Object.entries(record.localAssets)) {
+      if (localPath) state.realAssets[slot] = localPath;
+    }
+  }
+  state.realModelUrl = record.localModelUrl || record.realModelUrl || null;
+  state.realHeroImage = record.localAssets?.hero || record.realHeroImage || null;
+  state.isUploadedImage = record.isUploadedImage || false;
+  state.uploadedImageBase64 = record.uploadedImageBase64 || null;
+  state.market = record.market || 'cn';
+  state.threeRendersReady = false; // 恢复时默认显示 loading，不直接显示可能失效的旧图
+  state.uploadedImage = null;
+
+  // 同步 UI
+  syncEditInputs();
+  document.querySelectorAll('.template-btn').forEach(b => {
+    b.classList.toggle('active', b.dataset.template === state.template);
+  });
+  document.querySelectorAll('.market-btn').forEach(b => {
+    b.classList.toggle('active', b.dataset.market === state.market);
+  });
+  renderPlatformButtons();
+  // 显示预览
+  if (record.uploadedImageBase64) {
+    showPreview(record.uploadedImageBase64, record.title, state.productType);
+  }
+
+  // 隐藏输入和进度，直接显示结果
+  $('step-input').style.opacity = '1';
+  $('step-input').style.pointerEvents = 'auto';
+  $('step-pipeline').style.display = 'none';
+  $('step-result').style.display = 'block';
+  $('step-result').scrollIntoView({ behavior: 'smooth', block: 'start' });
+
+  // 重新初始化 3D，恢复时默认显示 loading，不直接加载可能失效的旧模型
+  if (state.scene) {
+    state.renderer?.dispose();
+    state.scene = null;
+    state.camera = null;
+    state.renderer = null;
+    state.controls = null;
+    state.productMesh = null;
+    $('three-canvas').innerHTML = '';
+  }
+  // 暂时清空 realModelUrl，避免 initThreeJS 自动加载可能已失效的 GLB
+  const savedModelUrl = state.realModelUrl;
+  state.realModelUrl = null;
+  initThreeJS();
+  // 恢复 URL 供后续使用（如重新生成时）
+  state.realModelUrl = savedModelUrl;
+
+  renderAssetGrid(currentTab || 'main');
+  renderDetailImage();
+  updateEditorState();
+}
+
+async function deleteHistory(id) {
+  // 先删除服务端本地文件
+  try {
+    await fetch('/api/history/delete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ recordId: id }),
+    });
+  } catch (err) {
+    console.warn('[deleteHistory] server delete failed:', err);
+  }
+  let history = loadHistory();
+  history = history.filter(h => h.id !== id);
+  localStorage.setItem(HISTORY_KEY, JSON.stringify(history));
+  renderHistoryList();
+  toast('已删除历史记录');
+}
+
+function renderHistoryList() {
+  const list = $('history-list');
+  if (!list) return;
+  const history = loadHistory();
+  if (history.length === 0) {
+    list.innerHTML = '<div class="history-empty">暂无历史记录</div>';
+    return;
+  }
+  list.innerHTML = history.map(h => {
+    const date = new Date(h.timestamp);
+    const timeStr = `${date.getMonth()+1}/${date.getDate()} ${String(date.getHours()).padStart(2,'0')}:${String(date.getMinutes()).padStart(2,'0')}`;
+    const thumb = h.uploadedImageBase64
+      || (h.localAssets && (h.localAssets['main-1'] || h.localAssets['main-0']))
+      || (h.realAssets && (h.realAssets['main-1'] || h.realAssets['main-0']))
+      || '';
+    return `
+      <div class="history-item" data-id="${h.id}">
+        <div class="history-thumb" style="background-image:url('${thumb}')"></div>
+        <div class="history-info">
+          <div class="history-title">${escAttr(h.title)}</div>
+          <div class="history-meta">${timeStr} · ${MARKETS[h.market]?.name || '中国'} · ${h.template === 'cny' ? '国潮' : h.template === 'outdoor' ? '户外' : h.template === 'festival' ? '大促' : '极简'}</div>
+        </div>
+        <div class="history-actions">
+          <button class="history-restore" data-id="${h.id}">查看</button>
+          <button class="history-delete" data-id="${h.id}" title="删除">×</button>
+        </div>
+      </div>
+    `;
+  }).join('');
+  // 绑定恢复按钮
+  list.querySelectorAll('.history-restore').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const id = parseInt(btn.dataset.id);
+      const record = history.find(h => h.id === id);
+      if (record) {
+        restoreHistory(record);
+        toast('已恢复历史记录');
+      }
+    });
+  });
+  // 绑定删除按钮
+  list.querySelectorAll('.history-delete').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const id = parseInt(btn.dataset.id);
+      if (confirm('确定删除这条历史记录?')) {
+        deleteHistory(id);
+      }
+    });
+  });
+  list.querySelectorAll('.history-item').forEach(item => {
+    item.addEventListener('click', () => {
+      const id = parseInt(item.dataset.id);
+      const record = history.find(h => h.id === id);
+      if (record) {
+        restoreHistory(record);
+        toast('已恢复历史记录');
+      }
+    });
+  });
+}
+
+// ============ Markets & Platforms ============
+const MARKETS = {
+  cn: { name: '中国', flag: '🇨🇳', lang: 'zh', currency: '¥', platforms: ['taobao','jd','douyin'] },
+  us: { name: '美国', flag: '🇺🇸', lang: 'en', currency: '$', platforms: ['amazon','tiktok'] },
+  sea: { name: '东南亚', flag: '🌏', lang: 'en', currency: '$', platforms: ['shopee','lazada','tiktok'] },
+  eu: { name: '欧洲', flag: '🇪🇺', lang: 'en', currency: '€', platforms: ['amazon','aliexpress'] },
+  ru: { name: '俄罗斯', flag: '🇷🇺', lang: 'ru', currency: '₽', platforms: ['ozon','aliexpress'] },
+};
+
+const PLATFORMS = {
+  taobao:    { name: '淘宝', short: '淘宝' },
+  jd:        { name: '京东', short: '京东' },
+  douyin:    { name: '抖音', short: '抖音' },
+  amazon:    { name: 'Amazon', short: 'Amazon' },
+  tiktok:    { name: 'TikTok Shop', short: 'TikTok' },
+  shopee:    { name: 'Shopee', short: 'Shopee' },
+  lazada:    { name: 'Lazada', short: 'Lazada' },
+  aliexpress:{ name: 'AliExpress', short: 'AliExpress' },
+  ozon:      { name: 'Ozon', short: 'Ozon' },
+};
+
+// 详情页固定文案国际化（只翻译标题/标签，商品文案本身由 AI 或用户编辑决定）
+const I18N = {
+  cn: {
+    limited: 'LIMITED · 限时特惠', endSoon: '距结束仅剩', off50: '满 ¥500 减', offAmount: '¥ 50',
+    newArrival: 'SS26 NEW ARRIVAL', newLabel: 'NEW', newLabelSub: '新品',
+    loadingHero: '主图生成中', loadingScene: '场景图渲染中', loadingMaterial: '材质渲染中',
+    keyFeatures: '- 核 心 卖 点 -', keyFeaturesSub: 'KEY FEATURES',
+    sceneShow: '- 场 景 展 示 -', sceneShowSub: 'SCENE',
+    material: '- 材 质 特 写 -', materialSub: 'MATERIAL',
+    detailAnno: '- 细 节 标 注 -', detailAnnoSub: 'DETAIL',
+    specs: '- 规 格 参 数 -', specsSub: 'SPECIFICATIONS',
+    service: '- 服 务 保 障 -', serviceSub: 'PROMISE',
+    badges: [
+      { icon: '✓', title: '正品保证', desc: '官方授权' },
+      { icon: '↻', title: '7天无理由', desc: '到货起算' },
+      { icon: '✈', title: '顺丰包邮', desc: '全国大部分' },
+      { icon: '⚡', title: '24h 发货', desc: '当日下单' },
+    ],
+    chipLabels: ['正品保证', '顺丰包邮', '7天无理由'],
+    reviewsTitle: '- 用 户 好 评 -', reviewsSub: 'REVIEWS',
+    detailTitle: '详情', detailSub: 'DETAILS',
+  },
+  en: {
+    limited: 'LIMITED TIME', endSoon: 'ENDS IN', off50: 'Spend $50 Get', offAmount: '$ 5 Off',
+    newArrival: 'SS26 NEW ARRIVAL', newLabel: 'NEW', newLabelSub: 'ARRIVAL',
+    loadingHero: 'Generating...', loadingScene: 'Rendering...', loadingMaterial: 'Rendering...',
+    keyFeatures: '- KEY FEATURES -', keyFeaturesSub: 'FEATURES',
+    sceneShow: '- SCENE -', sceneShowSub: 'SCENE',
+    material: '- MATERIAL -', materialSub: 'MATERIAL',
+    detailAnno: '- DETAILS -', detailAnnoSub: 'DETAIL',
+    specs: '- SPECIFICATIONS -', specsSub: 'SPECS',
+    service: '- OUR PROMISE -', serviceSub: 'PROMISE',
+    badges: [
+      { icon: '✓', title: 'Authentic', desc: 'Guaranteed' },
+      { icon: '↻', title: '30-Day', desc: 'Free Returns' },
+      { icon: '✈', title: 'Free Shipping', desc: 'Worldwide' },
+      { icon: '⚡', title: 'Fast Dispatch', desc: 'Ships Today' },
+    ],
+    chipLabels: ['Authentic', 'Free Ship', '30-Day Return'],
+    reviewsTitle: '- CUSTOMER REVIEWS -', reviewsSub: 'REVIEWS',
+    detailTitle: 'Details', detailSub: 'DETAILS',
+  },
+  ru: {
+    limited: 'ОГРАНИЧЕННО', endSoon: 'ЗАКАНЧИВАЕТСЯ', off50: 'Скидка', offAmount: '500 ₽',
+    newArrival: 'SS26 НОВИНКА', newLabel: 'NEW', newLabelSub: 'НОВИНКА',
+    loadingHero: 'Генерация...', loadingScene: 'Рендеринг...', loadingMaterial: 'Рендеринг...',
+    keyFeatures: '- КЛЮЧЕВЫЕ ОСОБЕННОСТИ -', keyFeaturesSub: 'ОСОБЕННОСТИ',
+    sceneShow: '- СЦЕНА -', sceneShowSub: 'СЦЕНА',
+    material: '- МАТЕРИАЛ -', materialSub: 'МАТЕРИАЛ',
+    detailAnno: '- ДЕТАЛИ -', detailAnnoSub: 'ДЕТАЛИ',
+    specs: '- ХАРАКТЕРИСТИКИ -', specsSub: 'СПЕЦИФИКАЦИЯ',
+    service: '- НАШИ ГАРАНТИИ -', serviceSub: 'ГАРАНТИИ',
+    badges: [
+      { icon: '✓', title: 'Оригинал', desc: 'Гарантия' },
+      { icon: '↻', title: '14 дней', desc: 'На возврат' },
+      { icon: '✈', title: 'Доставка', desc: 'По России' },
+      { icon: '⚡', title: 'Быстрая', desc: 'Отправка' },
+    ],
+    chipLabels: ['Оригинал', 'Доставка', '14 дней'],
+    reviewsTitle: '- ОТЗЫВЫ -', reviewsSub: 'ОТЗЫВЫ',
+    detailTitle: 'Детали', detailSub: 'ДЕТАЛИ',
+  },
+};
+
+function t(key) {
+  const m = state.market || 'cn';
+  const lang = MARKETS[m]?.lang || 'zh';
+  return (I18N[lang] && I18N[lang][key]) || (I18N.cn[key]) || key;
+}
 
 const SAMPLES = {
   shoe: {
@@ -261,14 +572,20 @@ const TEMPLATES = {
       const ink = goldOnRed ? '#fff' : '#c0392b';
       const e = state.edits;
       const discount = Math.max(0, parseInt(e.origPrice) - parseInt(e.price)) || 50;
+      const isCN = (state.market || 'cn') === 'cn';
+      const promoTitle = isCN ? '限时特惠' : 'SALE';
+      const promoSub = isCN ? `立减 ${discount} 元` : `Save ${discount}`;
+      const promoPrice = isCN ? '特惠价' : 'SALE';
+      const promoTags = isCN ? '✓ 顺丰包邮   ✓ 7天无理由   ✓ 假一赔十' : '✓ Free Ship   ✓ 30-Day   ✓ Authentic';
+      const curSym = MARKETS[state.market]?.currency || '¥';
       return `
-        <text x="14" y="24" font-size="13" font-weight="800" fill="${ink}">限时特惠</text>
-        <text x="14" y="38" font-size="9" font-weight="600" fill="${accent}">立减 ${discount} 元</text>
+        <text x="14" y="24" font-size="13" font-weight="800" fill="${ink}">${promoTitle}</text>
+        <text x="14" y="38" font-size="9" font-weight="600" fill="${accent}">${promoSub}</text>
         <circle cx="172" cy="32" r="22" fill="${accent}" stroke="#fff" stroke-width="1.5"/>
-        <text x="172" y="28" text-anchor="middle" font-size="7" font-weight="700" fill="#c0392b">特惠价</text>
-        <text x="172" y="42" text-anchor="middle" font-size="12" font-weight="800" fill="#c0392b">¥${e.price}</text>
+        <text x="172" y="28" text-anchor="middle" font-size="7" font-weight="700" fill="#c0392b">${promoPrice}</text>
+        <text x="172" y="42" text-anchor="middle" font-size="12" font-weight="800" fill="#c0392b">${curSym}${e.price}</text>
         <rect x="0" y="178" width="200" height="22" fill="rgba(0,0,0,0.35)"/>
-        <text x="100" y="192" text-anchor="middle" font-size="7.5" font-weight="600" fill="#fff" letter-spacing="1">✓ 顺丰包邮   ✓ 7天无理由   ✓ 假一赔十</text>
+        <text x="100" y="192" text-anchor="middle" font-size="7.5" font-weight="600" fill="#fff" letter-spacing="1">${promoTags}</text>
       `;
     },
   },
@@ -347,10 +664,49 @@ document.querySelectorAll('.tab-btn').forEach(btn => {
   });
 });
 
+// ===== Market selection =====
+document.querySelectorAll('.market-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    if (btn.classList.contains('active')) return;
+    document.querySelectorAll('.market-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    state.market = btn.dataset.market;
+    renderPlatformButtons();
+    toast(`已切换至「${MARKETS[state.market].name}」市场`);
+  });
+});
+
+function renderPlatformButtons() {
+  const wrap = document.querySelector('.publish-actions');
+  if (!wrap) return;
+  const platforms = MARKETS[state.market]?.platforms || ['taobao'];
+  // 保留「下载全套 ZIP」和「重新生成」按钮，只替换中间的平台按钮
+  const keep = [];
+  wrap.querySelectorAll('.platform-btn').forEach(b => b.remove());
+  platforms.forEach(key => {
+    const p = PLATFORMS[key];
+    if (!p) return;
+    const b = document.createElement('button');
+    b.className = 'platform-btn';
+    b.dataset.platform = key;
+    b.textContent = '同步 ' + p.short;
+    b.addEventListener('click', () => {
+      toast(`已同步到 ${p.name}, SKU-${Math.floor(Math.random()*90000)+10000}`);
+    });
+    // 插入到「重新生成」按钮之前
+    const restart = wrap.querySelector('#restart-btn');
+    if (restart) {
+      wrap.insertBefore(b, restart);
+    } else {
+      wrap.appendChild(b);
+    }
+  });
+}
+
 document.querySelectorAll('.platform-btn').forEach(btn => {
   btn.addEventListener('click', () => {
-    const platforms = { taobao: '淘宝', jd: '京东', douyin: '抖音' };
-    const name = platforms[btn.dataset.platform];
+    const p = PLATFORMS[btn.dataset.platform];
+    const name = p ? p.name : btn.dataset.platform;
     toast(`已同步到${name},商品 ID:SKU-${Math.floor(Math.random()*90000)+10000}`);
   });
 });
@@ -520,7 +876,7 @@ const LOGS = [
   { delay: 2000, msg: '版式与品牌字体应用完毕', type: 'ok' },
   { delay: 2200, msg: '渲染 5 张主图', type: 'info' },
   { delay: 2500, msg: '合成 3 张场景图', type: 'info' },
-  { delay: 2750, msg: '生成细节与变体图', type: 'info' },
+  { delay: 2750, msg: '生成细节图', type: 'info' },
   { delay: 3000, msg: '适配平台尺寸 (淘宝 / 京东 / 抖音)', type: 'info' },
   { delay: 3200, msg: '全部素材生成完毕,可直接上架', type: 'ok' },
 ];
@@ -547,6 +903,20 @@ async function runPipeline() {
   state.realBaseColor = null;
   state.threeRendersReady = false; // 3D 完成前套图区域显示 loading
   updateEditorState();
+
+  // 隐藏上一轮结果，清空 3D 场景，避免残留旧内容
+  $('step-result').style.display = 'none';
+  if (state.scene) {
+    // 释放旧 Three.js 场景，下一轮会重新 initThreeJS
+    state.renderer?.dispose();
+    state.scene = null;
+    state.camera = null;
+    state.renderer = null;
+    state.controls = null;
+    state.productMesh = null;
+    $('three-canvas').innerHTML = '';
+  }
+  $('asset-grid').innerHTML = '';
 
   if (state.mode === 'real') {
     await runRealPipeline();
@@ -586,16 +956,19 @@ async function runRealPipeline() {
   const productPrompt = makeProductPrompt(genType, state.color, state.edits);
   const imagePrompts = makeAssetPrompts(genType, state.color, state.edits);
 
-  // ---- 状态条: 显示 + 初始化所有缩略图占位 ----
+  // ---- 状态条显示 ----
   $('pipeline-statusbar').style.display = 'flex';
-  initStatusThumbs(imagePrompts);
   const startTime = Date.now();
   const phaseTimer = startPhaseRotator(startTime);
 
   try {
     // ===== Step 1: 启动 Tripo 3D =====
     setStep(0, true);
-    addLog(`提示词: ${productPrompt.short}`, 'info');
+    if (state.isUploadedImage && state.uploadedImageBase64) {
+      addLog('图生 3D: 使用用户上传图片 (prompt 与 image 互斥,仅传图片)', 'info');
+    } else {
+      addLog(`提示词: ${productPrompt.short}`, 'info');
+    }
     addLog('提交 Tripo 3D 任务...', 'info');
 
     const tripoTaskId = await startTripoTask(productPrompt.full);
@@ -619,12 +992,12 @@ async function runRealPipeline() {
         if (Array.isArray(ai.specs)) ai.specs.forEach((s,i)=>{if(i<4&&state.edits.specs[i]){if(s.label)state.edits.specs[i].label=s.label;if(s.value)state.edits.specs[i].value=s.value}});
         syncEditInputs();
         try { if ($('step-result').style.display !== 'none') renderDetailImage(); } catch {}
-      }).catch(err => { console.warn('AI 文案生成失败:', err); });
+      }).catch(() => {});
     }
 
     // ===== Step 2: 并发提交全部 Z-Image 任务 =====
     setStep(1, true);
-    addLog(`并发提交 ${imagePrompts.length} 个 Z-Image 任务 (主图 / 场景 / 细节 / 变体 / Hero)`, 'info');
+    addLog(`并发提交 ${imagePrompts.length} 个 Z-Image 任务 (主图 / 场景 / 细节 / Hero)`, 'info');
     let completed = 0;
     const totalGens = imagePrompts.length;
 
@@ -637,13 +1010,11 @@ async function runRealPipeline() {
     // 并发跑所有图片生成 (限流 4,失败自动重试 2 次)
     const gate = gateLimit(4);
     const imagePromises = imagePrompts.map((p) => {
-      markThumb(p.slot, 'running');
       return gate(() => callImageGenWithRetry(p.prompt, '1024*1024'))
         .then(url => {
           const elapsed = ((Date.now() - startTime) / 1000).toFixed(0);
           state.realAssets[p.slot] = url;
           if (p.slot === 'hero') state.realHeroImage = url;
-          markThumb(p.slot, 'done', url);
           completed++;
           updateThumbCount(completed, totalGens);
           addLog(`✓ ${labelOfSlot(p.slot)}  已就绪  (${elapsed}s)`, 'ok');
@@ -658,14 +1029,13 @@ async function runRealPipeline() {
           return { slot: p.slot, url };
         })
         .catch(err => {
-          markThumb(p.slot, 'fail');
           addLog(`× ${labelOfSlot(p.slot)}  ${err.message || err}`, 'warn');
           return { slot: p.slot, url: null };
         });
     });
 
-    // 等到至少 6 张图就绪就展示结果(不必等全 13 张)
-    await raceUntilCount(imagePromises, Math.min(6, imagePrompts.length));
+    // 等到至少 5 张图就绪就展示结果(不必等全部)
+    await raceUntilCount(imagePromises, Math.min(5, imagePrompts.length));
     setStep(2, true);
     setStepProgress(1, (completed / totalGens) * 100);
     addLog(`首批素材就绪 (${completed}/${totalGens}),提前展示`, 'ok');
@@ -678,7 +1048,7 @@ async function runRealPipeline() {
     // 后台等 Tripo 完成 (不阻塞 UI)
     let tripoDone = false;
     let imagesDone = false;
-    const finalize = () => {
+    const finalize = async () => {
       if (!tripoDone || !imagesDone) return;
       setPhase('全部完成');
       clearInterval(phaseTimer);
@@ -687,9 +1057,11 @@ async function runRealPipeline() {
         spinner.style.borderTopColor = '#16a34a';
         spinner.style.animation = 'none';
       }
+      // 保存到历史记录（下载图片到本地后持久化）
+      try { await saveToHistory(); } catch (e) { console.warn('saveToHistory failed', e); }
     };
 
-    tripoPromise.then(glbUrl => {
+    tripoPromise.then(async glbUrl => {
       const elapsed = ((Date.now() - startTime) / 1000).toFixed(0);
       if (glbUrl) {
         state.realModelUrl = glbUrl;
@@ -713,8 +1085,8 @@ async function runRealPipeline() {
         try { renderAssetGrid(currentTab); renderDetailImage(); } catch {}
       }
       tripoDone = true;
-      finalize();
-    }).catch(err => {
+      await finalize();
+    }).catch(async err => {
       addLog('Tripo 失败: ' + (err.message || err), 'warn');
       hideThreeLoading();
       if (state.scene && !state.productMesh) {
@@ -727,14 +1099,14 @@ async function runRealPipeline() {
       updateEditorState();
       try { renderAssetGrid(currentTab); renderDetailImage(); } catch {}
       tripoDone = true;
-      finalize();
+      await finalize();
     });
 
     // 等所有图片完成 (含重试 / 失败) 后再标"全部完成"
-    Promise.allSettled(imagePromises).then(() => {
+    Promise.allSettled(imagePromises).then(async () => {
       addLog(`Z-Image 全部任务结束 (${completed}/${totalGens})`, completed === totalGens ? 'ok' : 'warn');
       imagesDone = true;
-      finalize();
+      await finalize();
       // 最后再刷一次,确保所有就绪的图都进入卡片
       if ($('step-result').style.display !== 'none') {
         try { renderAssetGrid(currentTab); renderDetailImage(); } catch {}
@@ -761,7 +1133,6 @@ function labelOfSlot(slot) {
     'main-0': '主图 正面', 'main-1': '主图 45°', 'main-2': '主图 侧面', 'main-3': '主图 俯视', 'main-4': '主图 背面',
     'scene-0': '场景 户外', 'scene-1': '场景 室内', 'scene-2': '场景 工作室',
     'detail-0': '细节 材质', 'detail-1': '细节 Logo',
-    'variant-0': '变体 红', 'variant-1': '变体 蓝',
     'hero': '详情 Hero',
   };
   return map[slot] || slot;
@@ -769,41 +1140,6 @@ function labelOfSlot(slot) {
 
 function slotMatchesTab(slot, tab) {
   return slot.startsWith(tab + '-') || (tab === 'main' && slot === 'hero');
-}
-
-function initStatusThumbs(prompts) {
-  const wrap = $('sb-thumbs');
-  wrap.innerHTML = '';
-  // 紧凑显示 5+3+2+2+1 = 13,但只显示前 8 个用 +N 表示其余
-  const shown = prompts.slice(0, 8);
-  shown.forEach(p => {
-    const t = document.createElement('div');
-    t.className = 'sb-thumb pending';
-    t.dataset.slot = p.slot;
-    t.title = labelOfSlot(p.slot);
-    wrap.appendChild(t);
-  });
-  if (prompts.length > 8) {
-    const more = document.createElement('div');
-    more.className = 'sb-thumb pending';
-    more.textContent = '+' + (prompts.length - 8);
-    wrap.appendChild(more);
-  }
-  updateThumbCount(0, prompts.length);
-}
-
-function markThumb(slot, status, url) {
-  const wrap = $('sb-thumbs');
-  if (!wrap) return;
-  const t = wrap.querySelector(`[data-slot="${slot}"]`);
-  if (!t) return;
-  t.classList.remove('pending', 'running', 'done', 'fail');
-  t.classList.add(status);
-  if (status === 'done' && url) {
-    t.innerHTML = `<img src="${proxyImageUrl(url)}" alt="" referrerpolicy="no-referrer">`;
-  } else if (status === 'fail') {
-    t.textContent = '!';
-  }
 }
 
 function updateThumbCount(done, total) {
@@ -950,31 +1286,58 @@ function makeProductPrompt(type, color, edits) {
 
 function makeAssetPrompts(type, color, edits) {
   const baseColor = SAMPLES[type]?.color || color;
-  const colorWords = {
-    '#c0392b': '红色', '#2c5f8d': '蓝色', '#3a7d44': '绿色',
-    '#d4a017': '金黄色', '#2c2c2c': '黑色', '#5b3a8a': '紫色',
-  };
-  const c = colorWords[baseColor] || '彩色';
-  const productCn = {
-    shoe: '鞋子', bag: '包袋', bottle: '杯具', chair: '座椅', jewelry: '珠宝',
-  }[type] || '商品';
-  const baseStyle = '电商商品摄影, 简洁干净, 高质量, 8K, 锐利清晰, 无水印';
-  const whiteBg = '纯白背景, 摄影棚灯光';
+  const isCN = (state.market || 'cn') === 'cn';
 
+  if (isCN) {
+    const colorWords = {
+      '#c0392b': '红色', '#2c5f8d': '蓝色', '#3a7d44': '绿色',
+      '#d4a017': '金黄色', '#2c2c2c': '黑色', '#5b3a8a': '紫色',
+    };
+    const c = colorWords[baseColor] || '彩色';
+    const productCn = {
+      shoe: '鞋子', bag: '包袋', bottle: '杯具', chair: '座椅', jewelry: '珠宝',
+    }[type] || '商品';
+    const baseStyle = '电商商品摄影, 简洁干净, 高质量, 8K, 锐利清晰, 无水印';
+    const whiteBg = '纯白背景, 摄影棚灯光';
+    const sceneRefPrefix = state.uploadedImageBase64 ? '基于原商品风格的' : '';
+    return [
+      { slot: 'main-0', prompt: `${c}${productCn}, 正面平拍, ${whiteBg}, ${baseStyle}` },
+      { slot: 'main-1', prompt: `${c}${productCn}, 45度斜视角, ${whiteBg}, ${baseStyle}` },
+      { slot: 'main-2', prompt: `${c}${productCn}, 侧面视角, ${whiteBg}, ${baseStyle}` },
+      { slot: 'main-3', prompt: `${c}${productCn}, 俯视角度, ${whiteBg}, ${baseStyle}` },
+      { slot: 'main-4', prompt: `${c}${productCn}, 背面视角, ${whiteBg}, ${baseStyle}` },
+      { slot: 'scene-0', prompt: `${sceneRefPrefix}${c}${productCn}, 户外自然场景, 与原商品一致的光影风格, 生活方式摄影, 产品与环境和谐融合, ${baseStyle}` },
+      { slot: 'scene-1', prompt: `${sceneRefPrefix}${c}${productCn}, 现代简约室内场景, 暖色调柔光, 与原商品一致的风格, 生活方式摄影, ${baseStyle}` },
+      { slot: 'scene-2', prompt: `${sceneRefPrefix}${c}${productCn}, 专业工作室场景, 戏剧性光影, 与原商品一致的风格, 高级质感, ${baseStyle}` },
+      { slot: 'detail-0', prompt: `${c}${productCn} 材质表面微距特写, 清晰可见纹理与材质细节, 微距摄影, ${whiteBg}, ${baseStyle}` },
+      { slot: 'detail-1', prompt: `${c}${productCn} 工艺细节特写, 清晰展示缝线与做工, 微距摄影, ${whiteBg}, ${baseStyle}` },
+      { slot: 'hero', prompt: `${c}${productCn}, 极具质感的产品大图, ${whiteBg}, 顶级电商主图, ${baseStyle}` },
+    ];
+  }
+
+  // 海外市场统一用英文 prompt
+  const colorEn = {
+    '#c0392b': 'red', '#2c5f8d': 'blue', '#3a7d44': 'green',
+    '#d4a017': 'gold', '#2c2c2c': 'black', '#5b3a8a': 'purple',
+  }[baseColor] || '';
+  const productEn = {
+    shoe: 'shoe', bag: 'bag', bottle: 'bottle', chair: 'chair', jewelry: 'jewelry',
+  }[type] || 'product';
+  const baseStyle = 'e-commerce product photography, clean minimal style, high quality, 8K, sharp and clear, no watermark';
+  const whiteBg = 'pure white background, studio lighting';
+  const sceneRefPrefix = state.uploadedImageBase64 ? 'Matching original product style, ' : '';
   return [
-    { slot: 'main-0', prompt: `${c}${productCn}, 正面平拍, ${whiteBg}, ${baseStyle}` },
-    { slot: 'main-1', prompt: `${c}${productCn}, 45度斜视角, ${whiteBg}, ${baseStyle}` },
-    { slot: 'main-2', prompt: `${c}${productCn}, 侧面视角, ${whiteBg}, ${baseStyle}` },
-    { slot: 'main-3', prompt: `${c}${productCn}, 俯视角度, ${whiteBg}, ${baseStyle}` },
-    { slot: 'main-4', prompt: `${c}${productCn}, 背面视角, ${whiteBg}, ${baseStyle}` },
-    { slot: 'scene-0', prompt: `${c}${productCn}, 户外阳光场景, 自然光摄影, 生活方式, ${baseStyle}` },
-    { slot: 'scene-1', prompt: `${c}${productCn}, 现代室内场景, 暖色调, 生活方式摄影, ${baseStyle}` },
-    { slot: 'scene-2', prompt: `${c}${productCn}, 工作室深色背景, 戏剧化布光, ${baseStyle}` },
-    { slot: 'detail-0', prompt: `${c}${productCn} 材质特写, 微距摄影, ${whiteBg}, ${baseStyle}` },
-    { slot: 'detail-1', prompt: `${c}${productCn} Logo 区域特写, 微距, ${whiteBg}, ${baseStyle}` },
-    { slot: 'variant-0', prompt: `红色${productCn}, 45度视角, ${whiteBg}, ${baseStyle}` },
-    { slot: 'variant-1', prompt: `蓝色${productCn}, 45度视角, ${whiteBg}, ${baseStyle}` },
-    { slot: 'hero', prompt: `${c}${productCn}, 极具质感的产品大图, ${whiteBg}, 顶级电商主图, ${baseStyle}` },
+    { slot: 'main-0', prompt: `${colorEn} ${productEn}, front view flat lay, ${whiteBg}, ${baseStyle}` },
+    { slot: 'main-1', prompt: `${colorEn} ${productEn}, 45 degree angle, ${whiteBg}, ${baseStyle}` },
+    { slot: 'main-2', prompt: `${colorEn} ${productEn}, side view, ${whiteBg}, ${baseStyle}` },
+    { slot: 'main-3', prompt: `${colorEn} ${productEn}, top down view, ${whiteBg}, ${baseStyle}` },
+    { slot: 'main-4', prompt: `${colorEn} ${productEn}, back view, ${whiteBg}, ${baseStyle}` },
+    { slot: 'scene-0', prompt: `${sceneRefPrefix}${colorEn} ${productEn}, outdoor natural setting, matching product lighting style, lifestyle photography, product harmoniously blended with environment, ${baseStyle}` },
+    { slot: 'scene-1', prompt: `${sceneRefPrefix}${colorEn} ${productEn}, modern minimalist indoor scene, warm soft lighting, matching original style, lifestyle photography, ${baseStyle}` },
+    { slot: 'scene-2', prompt: `${sceneRefPrefix}${colorEn} ${productEn}, professional studio scene, dramatic lighting, matching original style, premium quality, ${baseStyle}` },
+    { slot: 'detail-0', prompt: `${colorEn} ${productEn} material surface macro close-up, clear visible texture and material details, macro photography, ${whiteBg}, ${baseStyle}` },
+    { slot: 'detail-1', prompt: `${colorEn} ${productEn} craftsmanship detail close-up, clear stitching and workmanship, macro photography, ${whiteBg}, ${baseStyle}` },
+    { slot: 'hero', prompt: `${colorEn} ${productEn}, premium product hero shot, ${whiteBg}, top-tier e-commerce main image, ${baseStyle}` },
   ];
 }
 
@@ -982,11 +1345,11 @@ function makeAssetPrompts(type, color, edits) {
 async function startTripoTask(prompt) {
   const body = { texture_quality: 'standard' };
 
-  // 如果用户上传了图片,传给 Tripo 做图生 3D(同时保留文本提示做辅助)
+  // Tripo input.image / input.images / input.prompt 三者互斥
+  // 用户上传图片时走图生 3D，只传 image，不传 prompt
   if (state.uploadedImageBase64) {
     body.image = state.uploadedImageBase64;
-    body.prompt = prompt;
-    addLog('使用用户上传图片进行 3D 重建', 'info');
+    addLog('使用用户上传图片进行 3D 重建 (图生 3D)', 'info');
   } else {
     body.prompt = prompt;
   }
@@ -1022,29 +1385,72 @@ async function callImageGen(prompt, size = '1024*1024') {
 // ---- 商品图片 AI 分析:自动生成品牌、标题、卖点等文案 ----
 async function analyzeProductImage(base64Image) {
   if (!base64Image) return null;
-  const prompt = '你是一位电商运营专家。请分析这张商品图片,以JSON格式返回以下字段:\n'
-    + '{\n'
-    + '  "brand": "建议的品牌英文名(1-2个单词)",\n'
-    + '  "brandCn": "建议的品牌中文名(2个字,如\'云舟\')",\n'
-    + '  "title": "商品标题(简洁有力,不超过15字)",\n'
-    + '  "subtitle": "副标题(不超过10字,如\'轻奢通勤系列\')",\n'
-    + '  "price": "建议售价(数字,整数)",\n'
-    + '  "origPrice": "建议划线价(数字,整数,比售价高30-100%)",\n'
-    + '  "slogans": ["卖点1(4字)", "卖点2(4字)", "卖点3(4字)"],\n'
-    + '  "sloganDescs": ["卖点1描述(不超过10字)", "卖点2描述", "卖点3描述"],\n'
-    + '  "specs": [\n'
-    + '    {"label": "规格一", "value": "值"},\n'
-    + '    {"label": "规格二", "value": "值"},\n'
-    + '    {"label": "材质", "value": "主要材质描述"},\n'
-    + '    {"label": "适用", "value": "适用场景"}\n'
-    + '  ]\n'
-    + '}\n'
-    + '只返回JSON,不要其他文字。';
+  const market = state.market || 'cn';
+  const lang = MARKETS[market]?.lang || 'zh';
+  let prompt;
+  if (lang === 'ru') {
+    prompt = `Ты эксперт по электронной коммерции. Проанализируй изображение товара и верни JSON с полями:
+{
+  "brand": "Рекомендуемое английское название бренда (1-2 слова)",
+  "brandCn": "Рекомендуемое русское название бренда (2 слова)",
+  "title": "Название товара (краткое, мощное, до 15 слов)",
+  "subtitle": "Подзаголовок (до 10 слов)",
+  "price": "Рекомендуемая цена (число, целое)",
+  "origPrice": "Рекомендуемая зачеркнутая цена (на 30-100% выше)",
+  "slogans": ["Преимущество 1 (4 слова)", "Преимущество 2 (4 слова)", "Преимущество 3 (4 слова)"],
+  "sloganDescs": ["Описание 1 (до 10 слов)", "Описание 2", "Описание 3"],
+  "specs": [
+    {"label": "Параметр 1", "value": "Значение"},
+    {"label": "Параметр 2", "value": "Значение"},
+    {"label": "Материал", "value": "Описание материала"},
+    {"label": "Применение", "value": "Сценарий использования"}
+  ]
+}
+Верни только JSON, без другого текста.`;
+  } else if (lang === 'en') {
+    prompt = `You are an e-commerce expert. Analyze this product image and return JSON with these fields:
+{
+  "brand": "Recommended brand name in English (1-2 words)",
+  "brandCn": "Localized brand name (2 words)",
+  "title": "Product title (concise and punchy, max 15 words)",
+  "subtitle": "Subtitle (max 10 words)",
+  "price": "Recommended price (integer)",
+  "origPrice": "Recommended crossed-out price (30-100% higher)",
+  "slogans": ["Feature 1 (4 words)", "Feature 2 (4 words)", "Feature 3 (4 words)"],
+  "sloganDescs": ["Description 1 (max 10 words)", "Description 2", "Description 3"],
+  "specs": [
+    {"label": "Spec 1", "value": "Value"},
+    {"label": "Spec 2", "value": "Value"},
+    {"label": "Material", "value": "Material description"},
+    {"label": "Usage", "value": "Usage scenario"}
+  ]
+}
+Return only JSON, no other text.`;
+  } else {
+    prompt = `你是一位电商运营专家。请分析这张商品图片,以JSON格式返回以下字段:
+{
+  "brand": "建议的品牌英文名(1-2个单词)",
+  "brandCn": "建议的品牌中文名(2个字,如'云舟')",
+  "title": "商品标题(简洁有力,不超过15字)",
+  "subtitle": "副标题(不超过10字,如'轻奢通勤系列')",
+  "price": "建议售价(数字,整数)",
+  "origPrice": "建议划线价(数字,整数,比售价高30-100%)",
+  "slogans": ["卖点1(4字)", "卖点2(4字)", "卖点3(4字)"],
+  "sloganDescs": ["卖点1描述(不超过10字)", "卖点2描述", "卖点3描述"],
+  "specs": [
+    {"label": "规格一", "value": "值"},
+    {"label": "规格二", "value": "值"},
+    {"label": "材质", "value": "主要材质描述"},
+    {"label": "适用", "value": "适用场景"}
+  ]
+}
+只返回JSON,不要其他文字。`;
+  }
   try {
     const r = await fetch('/api/analyze', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ image: base64Image }),
+      body: JSON.stringify({ image: base64Image, prompt }),
     });
     const data = await r.json();
     addLog('商品 AI 分析完成,正在生成文案...', 'info');
@@ -1060,14 +1466,11 @@ async function analyzeProductImage(base64Image) {
       try { json = JSON.parse(raw.slice(braceStart, braceEnd + 1)); } catch {}
     }
     if (!json) {
-      addLog('× 商品 AI 分析解析失败,继续使用默认文案', 'warn');
       return null;
     }
     if (!json.title) return null;
     return json;
   } catch (err) {
-    addLog(`× 商品 AI 分析失败: ${err.message}`, 'warn');
-    console.warn('商品分析失败:', err);
     return null;
   }
 }
@@ -1329,8 +1732,6 @@ const THREE_CAPTURE_ANGLES = {
   'scene-2': { pos: [0, 2.5, 4.5],   label: '场景' },
   'detail-0':{ pos: [0.8, 0.5, 2.0], label: '材质' },
   'detail-1':{ pos: [-0.5, 1.2, 1.8],label: 'Logo' },
-  'variant-0':{ pos: [3.0, 1.5, 3.0],label: '变体' },
-  'variant-1':{ pos: [3.0, 1.5, 3.0],label: '变体' },
   'hero':    { pos: [0, 1.5, 4.5],   label: 'Hero' },
 };
 
@@ -1766,10 +2167,6 @@ const ASSETS = {
     { label: '材质特写', angle: 60, zoom: 1.6 },
     { label: 'Logo 特写', angle: 0, zoom: 2 },
   ],
-  variant: [
-    { label: '红色',    angle: 30, color: '#c0392b' },
-    { label: '蓝色',    angle: 30, color: '#2c5f8d' },
-  ],
 };
 
 function renderAssetGrid(tab) {
@@ -1781,7 +2178,13 @@ function renderAssetGrid(tab) {
     card.className = 'asset-card';
     card.style.animationDelay = (idx * 40) + 'ms';
     card.innerHTML = makeAssetSVG(item, state.productType, tab, idx);
-    card.addEventListener('click', () => downloadAssetCard(item, state.productType, tab, idx));
+    // 细节图点击放大查看，其他直接下载
+    if (tab === 'detail') {
+      card.addEventListener('click', () => openLightbox(item, state.productType, tab, idx));
+      card.style.cursor = 'zoom-in';
+    } else {
+      card.addEventListener('click', () => downloadAssetCard(item, state.productType, tab, idx));
+    }
     grid.appendChild(card);
   });
   $('asset-count').textContent = items.length + ' 张';
@@ -1850,7 +2253,7 @@ function realAssetOrNull(url) {
 function proxyImageUrl(url) {
   // 在真实模式下,把 OSS 图片走代理,避免 canvas 导出时的 CORS 污染
   if (location.protocol === 'file:') return url; // 直接打开 HTML 时没法走代理
-  if (url && (url.startsWith('data:') || url.startsWith('blob:'))) return url; // data URL / blob 不走代理
+  if (url && (url.startsWith('data:') || url.startsWith('blob:') || url.startsWith('/history/'))) return url; // data URL / blob / 本地文件 不走代理
   return '/api/proxy?url=' + encodeURIComponent(url);
 }
 
@@ -1895,8 +2298,8 @@ function renderDetailImage() {
       const sy = y + 10 + ((i * 13) % 70);
       parts.push(`<circle cx="${sx}" cy="${sy}" r="1.5" fill="#fff" opacity="${0.3 + (i%3)*0.2}"/>`);
     }
-    parts.push(`<text x="22" y="${y+34}" font-size="11" letter-spacing="2" fill="#fff" opacity="0.85">LIMITED · 限 时 特 惠</text>`);
-    parts.push(`<text x="22" y="${y+62}" font-size="16" font-weight="800" fill="#fff">距 结 束 仅 剩</text>`);
+    parts.push(`<text x="22" y="${y+34}" font-size="11" letter-spacing="2" fill="#fff" opacity="0.85">${t('limited')}</text>`);
+    parts.push(`<text x="22" y="${y+62}" font-size="16" font-weight="800" fill="#fff">${t('endSoon')}</text>`);
     // Countdown boxes
     const cdX = 168;
     const cdW = 36;
@@ -1914,8 +2317,9 @@ function renderDetailImage() {
     });
     // Right info chip
     parts.push(`<rect x="${W-100}" y="${y+22}" width="84" height="46" fill="rgba(255,255,255,0.18)" rx="4" stroke="#fff" stroke-width="0.8"/>`);
-    parts.push(`<text x="${W-58}" y="${y+40}" text-anchor="middle" font-size="9" fill="#fff" opacity="0.9">满 ¥500 减</text>`);
-    parts.push(`<text x="${W-58}" y="${y+60}" text-anchor="middle" font-size="18" font-weight="800" fill="#ffeb3b">¥ 50</text>`);
+    const cur = MARKETS[state.market]?.currency || '¥';
+    parts.push(`<text x="${W-58}" y="${y+40}" text-anchor="middle" font-size="9" fill="#fff" opacity="0.9">${t('off50').replace('$', cur)}</text>`);
+    parts.push(`<text x="${W-58}" y="${y+60}" text-anchor="middle" font-size="18" font-weight="800" fill="#ffeb3b">${t('offAmount').replace('¥', cur).replace('$', cur)}</text>`);
     y += h;
   }
 
@@ -1933,7 +2337,7 @@ function renderDetailImage() {
       <circle r="32" fill="#c0392b" opacity="0.95"/>
       <circle r="28" fill="none" stroke="#fff" stroke-width="0.8" stroke-dasharray="2 2"/>
       <text y="-3" text-anchor="middle" font-size="9" font-weight="700" fill="#fff" letter-spacing="1">NEW</text>
-      <text y="11" text-anchor="middle" font-size="8" fill="#fff" opacity="0.9">新 品</text>
+      <text y="11" text-anchor="middle" font-size="8" fill="#fff" opacity="0.9">${t('newLabelSub')}</text>
     </g>`);
     // Product
     if (realAssetOrNull(state.realHeroImage)) {
@@ -1950,7 +2354,7 @@ function renderDetailImage() {
             <animateTransform attributeName="transform" type="rotate" from="0" to="360" dur="1.2s" repeatCount="indefinite"/>
           </circle>
         </g>
-        <text x="${W/2}" y="${y + 320}" text-anchor="middle" font-size="11" fill="#9999a8" letter-spacing="2">主图生成中</text>
+        <text x="${W/2}" y="${y + 320}" text-anchor="middle" font-size="11" fill="#9999a8" letter-spacing="2">${t('loadingHero')}</text>
       `);
     } else {
       parts.push(productAsSVG(state.productType, state.color, 25, 2.4, W/2, y + 250));
@@ -1959,9 +2363,11 @@ function renderDetailImage() {
     parts.push(`<text x="${W/2}" y="${y+450}" text-anchor="middle" font-size="26" font-weight="800" fill="${ink}">${esc(e.title)}</text>`);
     parts.push(`<text x="${W/2}" y="${y+476}" text-anchor="middle" font-size="11" letter-spacing="2" fill="${ink}" opacity="0.7">${esc(e.subtitle)}</text>`);
     // Price tag
-    parts.push(`<text x="${W/2}" y="${y+540}" text-anchor="middle"><tspan font-size="13" fill="${ink}" opacity="0.55">¥</tspan><tspan font-size="36" font-weight="800" fill="${priceColor}" dx="2">${esc(e.price)}</tspan><tspan font-size="11" fill="${ink}" opacity="0.5" text-decoration="line-through" dx="12" dy="-12">¥${esc(e.origPrice)}</tspan></text>`);
+    const curSym = MARKETS[state.market]?.currency || '¥';
+    parts.push(`<text x="${W/2}" y="${y+540}" text-anchor="middle"><tspan font-size="13" fill="${ink}" opacity="0.55">${curSym}</tspan><tspan font-size="36" font-weight="800" fill="${priceColor}" dx="2">${esc(e.price)}</tspan><tspan font-size="11" fill="${ink}" opacity="0.5" text-decoration="line-through" dx="12" dy="-12">${curSym}${esc(e.origPrice)}</tspan></text>`);
     // Bottom service chips
-    const chips = ['正品保证', '顺丰包邮', '7天无理由'];
+    const chipLabels = t('chipLabels');
+    const chips = Array.isArray(chipLabels) ? chipLabels : ['正品保证', '顺丰包邮', '7天无理由'];
     chips.forEach((c, i) => {
       const cx = W/2 - 90 + i * 90;
       parts.push(`<rect x="${cx - 38}" y="${y+558}" width="76" height="14" rx="7" fill="${ink}" opacity="0.08"/>`);
@@ -1974,8 +2380,8 @@ function renderDetailImage() {
   if (sec.slogans) {
     const h = 300;
     parts.push(`<rect x="0" y="${y}" width="${W}" height="${h}" fill="#fafafa"/>`);
-    parts.push(`<text x="${W/2}" y="${y+40}" text-anchor="middle" font-size="13" font-weight="700" letter-spacing="6" fill="#333">- 核 心 卖 点 -</text>`);
-    parts.push(`<text x="${W/2}" y="${y+58}" text-anchor="middle" font-size="9" letter-spacing="3" fill="#999">KEY FEATURES</text>`);
+    parts.push(`<text x="${W/2}" y="${y+40}" text-anchor="middle" font-size="13" font-weight="700" letter-spacing="6" fill="#333">${t('keyFeatures')}</text>`);
+    parts.push(`<text x="${W/2}" y="${y+58}" text-anchor="middle" font-size="9" letter-spacing="3" fill="#999">${t('keyFeaturesSub')}</text>`);
     const cols = 3;
     const colW = W / cols;
     const sloganIcons = [
@@ -2010,7 +2416,7 @@ function renderDetailImage() {
     const sceneIdx = state.template === 'minimal' ? 2 : 0;
     const fill = bgFill(tpl.bgScenes[sceneIdx], 'detail-scene-bg');
     parts.push(`<rect x="0" y="${y}" width="${W}" height="${h}" fill="${fill}"/>`);
-    parts.push(`<text x="${W/2}" y="${y+50}" text-anchor="middle" font-size="11" letter-spacing="4" fill="#fff" opacity="0.85">LIFESTYLE · 场 景 应 用</text>`);
+    parts.push(`<text x="${W/2}" y="${y+50}" text-anchor="middle" font-size="11" letter-spacing="4" fill="#fff" opacity="0.85">${t('sceneShow')}</text>`);
     parts.push(detailImageOrLoading('scene-0', W/2 - 130, y + 80, 260, 360, { angle: 30, zoom: 2.4 }));
     // Quote frame
     parts.push(`<text x="60" y="${y+470}" font-size="32" fill="#fff" opacity="0.45" font-family="Georgia, serif">"</text>`);
@@ -2038,13 +2444,13 @@ function renderDetailImage() {
           <animateTransform attributeName="transform" type="rotate" from="0" to="360" dur="1.2s" repeatCount="indefinite"/>
         </circle>
       </g>
-      <text x="100" y="${y+195}" text-anchor="middle" font-size="9" fill="#9999a8">材质特写生成中</text>`);
+      <text x="100" y="${y+195}" text-anchor="middle" font-size="9" fill="#9999a8">${t('loadingMaterial')}</text>`);
     } else {
       parts.push(`<rect x="20" y="${y+30}" width="160" height="260" fill="#fafafa" stroke="#e8e8e8" stroke-width="1"/>`);
       parts.push(productAsSVG(state.productType, state.color, 60, 1.4, 100, y + 160));
     }
     // Side text
-    parts.push(`<text x="${W/2+30}" y="${y+80}" font-size="11" letter-spacing="3" fill="${priceColor}">DETAIL · 材 质</text>`);
+    parts.push(`<text x="${W/2+30}" y="${y+80}" font-size="11" letter-spacing="3" fill="${priceColor}">${t('detailAnno')}</text>`);
     parts.push(`<text x="${W/2+30}" y="${y+115}" font-size="20" font-weight="800" fill="#222">极 致 工 艺</text>`);
     parts.push(`<line x1="${W/2+30}" y1="${y+128}" x2="${W/2+90}" y2="${y+128}" stroke="${priceColor}" stroke-width="2"/>`);
     parts.push(`<text x="${W/2+30}" y="${y+160}" font-size="10.5" fill="#555">· ${esc(e.specs[2].value)}</text>`);
@@ -2060,7 +2466,7 @@ function renderDetailImage() {
   if (sec.annotation) {
     const h = 480;
     parts.push(`<rect x="0" y="${y}" width="${W}" height="${h}" fill="#f5f5f0"/>`);
-    parts.push(`<text x="${W/2}" y="${y+42}" text-anchor="middle" font-size="13" font-weight="700" letter-spacing="6" fill="#333">- 细 节 解 析 -</text>`);
+    parts.push(`<text x="${W/2}" y="${y+42}" text-anchor="middle" font-size="13" font-weight="700" letter-spacing="6" fill="#333">${t('detailAnno')}</text>`);
     parts.push(`<text x="${W/2}" y="${y+60}" text-anchor="middle" font-size="9" letter-spacing="4" fill="#888">DETAIL VIEW</text>`);
     // 主图 45° 真实图(没就绪时 loading;mock 时程序化)
     const annUrl = realAssetOrNull(state.realAssets['main-1']);
@@ -2110,7 +2516,7 @@ function renderDetailImage() {
   if (sec.specs) {
     const h = 320;
     parts.push(`<rect x="0" y="${y}" width="${W}" height="${h}" fill="#ffffff"/>`);
-    parts.push(`<text x="${W/2}" y="${y+45}" text-anchor="middle" font-size="13" font-weight="700" letter-spacing="6" fill="#333">- 规 格 参 数 -</text>`);
+    parts.push(`<text x="${W/2}" y="${y+45}" text-anchor="middle" font-size="13" font-weight="700" letter-spacing="6" fill="#333">${t('specs')}</text>`);
     parts.push(`<text x="${W/2}" y="${y+62}" text-anchor="middle" font-size="9" letter-spacing="3" fill="#999">SPECIFICATIONS</text>`);
     const rowH = 42;
     const startY = y + 88;
@@ -2129,7 +2535,7 @@ function renderDetailImage() {
   if (sec.reviews) {
     const h = 380;
     parts.push(`<rect x="0" y="${y}" width="${W}" height="${h}" fill="#fafafa"/>`);
-    parts.push(`<text x="${W/2}" y="${y+40}" text-anchor="middle" font-size="13" font-weight="700" letter-spacing="6" fill="#333">- 用 户 好 评 -</text>`);
+    parts.push(`<text x="${W/2}" y="${y+40}" text-anchor="middle" font-size="13" font-weight="700" letter-spacing="6" fill="#333">${t('reviewsTitle')}</text>`);
     // Rating summary
     parts.push(`<text x="${W/2 - 50}" y="${y+72}" text-anchor="end" font-size="22" font-weight="800" fill="${priceColor}">4.9</text>`);
     // 5 stars
@@ -2137,13 +2543,19 @@ function renderDetailImage() {
       const sx = W/2 - 40 + i * 18;
       parts.push(`<path d="M ${sx} ${y+62} l 3 6.5 7 1 -5 5 1 7 -6 -3.5 -6 3.5 1 -7 -5 -5 7 -1 z" fill="${priceColor}"/>`);
     }
-    parts.push(`<text x="${W/2 + 60}" y="${y+72}" font-size="9.5" fill="#888">1,283 条评价</text>`);
+    const reviewCountText = (state.market === 'cn') ? '1,283 条评价' : '1,283 Reviews';
+    parts.push(`<text x="${W/2 + 60}" y="${y+72}" font-size="9.5" fill="#888">${reviewCountText}</text>`);
 
     // 2 review cards
-    const reviews = [
+    const isCN = state.market === 'cn';
+    const reviews = isCN ? [
       { name: '张**', verified: true, stars: 5, quote: '质量超出预期,做工细致,款式也很时尚,送的小礼物很贴心,值得入手!', tag: '已购买 · 30 天前' },
       { name: 'Lily', verified: true, stars: 5, quote: '官方旗舰品质,和图片一样!回购第二次,身边朋友也都种草了。', tag: '已购买 · 7 天前' },
+    ] : [
+      { name: 'John D.', verified: true, stars: 5, quote: 'Exceeded expectations! Great quality and stylish design. Worth every penny.', tag: 'Purchased · 30 days ago' },
+      { name: 'Sarah M.', verified: true, stars: 5, quote: 'Exactly as pictured. This is my second purchase. Recommended to all my friends!', tag: 'Purchased · 7 days ago' },
     ];
+    const verifiedText = isCN ? '✓ 已验证' : '✓ Verified';
     reviews.forEach((r, i) => {
       const cardY = y + 100 + i * 130;
       parts.push(`<rect x="20" y="${cardY}" width="${W-40}" height="118" fill="#fff" rx="6" stroke="#eaeaea" stroke-width="1"/>`);
@@ -2152,8 +2564,8 @@ function renderDetailImage() {
       parts.push(`<text x="42" y="${cardY+27}" text-anchor="middle" font-size="11" font-weight="700" fill="#fff">${r.name[0]}</text>`);
       // Name + verified badge
       parts.push(`<text x="64" y="${cardY+20}" font-size="11.5" font-weight="600" fill="#222">${r.name}</text>`);
-      parts.push(`<rect x="${64 + 28}" y="${cardY+12}" width="40" height="11" rx="2" fill="#16a34a" opacity="0.12"/>`);
-      parts.push(`<text x="${64 + 48}" y="${cardY+21}" text-anchor="middle" font-size="7.5" fill="#16a34a" font-weight="600">✓ 已验证</text>`);
+      parts.push(`<rect x="${64 + 28}" y="${cardY+12}" width="48" height="11" rx="2" fill="#16a34a" opacity="0.12"/>`);
+      parts.push(`<text x="${64 + 52}" y="${cardY+21}" text-anchor="middle" font-size="7.5" fill="#16a34a" font-weight="600">${verifiedText}</text>`);
       // Stars
       for (let s = 0; s < r.stars; s++) {
         const sx = 64 + s * 12;
@@ -2170,46 +2582,14 @@ function renderDetailImage() {
     y += h;
   }
 
-  // ---- Variants ----
-  if (sec.variants) {
-    const h = 280;
-    parts.push(`<rect x="0" y="${y}" width="${W}" height="${h}" fill="#ffffff"/>`);
-    parts.push(`<text x="${W/2}" y="${y+45}" text-anchor="middle" font-size="13" font-weight="700" letter-spacing="6" fill="#333">- 全 色 可 选 -</text>`);
-    parts.push(`<text x="${W/2}" y="${y+62}" text-anchor="middle" font-size="9" letter-spacing="3" fill="#999">COLORWAY</text>`);
-    const variantColors = [
-      { c: '#c0392b', n: '热力红' },
-      { c: '#2c5f8d', n: '深海蓝' },
-      { c: '#3a7d44', n: '森林绿' },
-      { c: '#d4a017', n: '复古黄' },
-      { c: '#2c2c2c', n: '夜雾黑' },
-    ];
-    const startX = 30;
-    const gap = (W - 60) / 5;
-    variantColors.forEach((v, i) => {
-      const cx = startX + gap * (i + 0.5);
-      const cy = y + 140;
-      const isActive = state.color.toLowerCase() === v.c.toLowerCase();
-      if (isActive) {
-        parts.push(`<circle cx="${cx}" cy="${cy}" r="30" fill="none" stroke="${priceColor}" stroke-width="1.5"/>`);
-      }
-      parts.push(`<circle cx="${cx}" cy="${cy}" r="24" fill="${v.c}" stroke="#fff" stroke-width="2"/>`);
-      parts.push(`<circle cx="${cx}" cy="${cy}" r="25" fill="none" stroke="#e5e5e5" stroke-width="1"/>`);
-      parts.push(`<text x="${cx}" y="${y+195}" text-anchor="middle" font-size="9.5" fill="${isActive ? priceColor : '#444'}" font-weight="${isActive ? '700' : '400'}">${v.n}</text>`);
-      if (isActive) {
-        parts.push(`<text x="${cx}" y="${y+212}" text-anchor="middle" font-size="7" fill="${priceColor}" letter-spacing="1">● 已选</text>`);
-      }
-    });
-    parts.push(`<text x="${W/2}" y="${y+250}" text-anchor="middle" font-size="9.5" fill="#888" letter-spacing="2">支持改色定制 · 7 个工作日发货</text>`);
-    y += h;
-  }
-
   // ---- NEW: Trust / service badges ----
   if (sec.trust) {
     const h = 200;
     parts.push(`<rect x="0" y="${y}" width="${W}" height="${h}" fill="#fafafa"/>`);
-    parts.push(`<text x="${W/2}" y="${y+38}" text-anchor="middle" font-size="13" font-weight="700" letter-spacing="6" fill="#333">- 服 务 保 障 -</text>`);
-    parts.push(`<text x="${W/2}" y="${y+55}" text-anchor="middle" font-size="9" letter-spacing="3" fill="#999">PROMISE</text>`);
-    const badges = [
+    parts.push(`<text x="${W/2}" y="${y+38}" text-anchor="middle" font-size="13" font-weight="700" letter-spacing="6" fill="#333">${t('service')}</text>`);
+    parts.push(`<text x="${W/2}" y="${y+55}" text-anchor="middle" font-size="9" letter-spacing="3" fill="#999">${t('serviceSub')}</text>`);
+    const badgeData = t('badges');
+    const badges = Array.isArray(badgeData) ? badgeData : [
       { icon: '✓', title: '正品保证', desc: '官方授权' },
       { icon: '↻', title: '7天无理由', desc: '到货起算' },
       { icon: '✈', title: '顺丰包邮', desc: '全国大部分' },
@@ -2232,8 +2612,10 @@ function renderDetailImage() {
   parts.push(`<rect x="0" y="${y}" width="${W}" height="100" fill="#1a1d20"/>`);
   parts.push(`<text x="${W/2}" y="${y+38}" text-anchor="middle" font-size="13" font-weight="700" letter-spacing="4" fill="#fff">${esc(e.brand)}</text>`);
   parts.push(`<line x1="${W/2-20}" y1="${y+48}" x2="${W/2+20}" y2="${y+48}" stroke="#fff" stroke-width="1" opacity="0.4"/>`);
-  parts.push(`<text x="${W/2}" y="${y+68}" text-anchor="middle" font-size="9" fill="#fff" opacity="0.6" letter-spacing="2">© 2026 ${esc(e.brand)} · 全国包邮 · 7天无理由</text>`);
-  parts.push(`<text x="${W/2}" y="${y+86}" text-anchor="middle" font-size="8" fill="#fff" opacity="0.4">本页面图文由「云桨 · 一图全店」自动生成</text>`);
+  const footerLine1 = (state.market === 'cn') ? `© 2026 ${esc(e.brand)} · 全国包邮 · 7天无理由` : `© 2026 ${esc(e.brand)} · Free Shipping · 30-Day Returns`;
+  const footerLine2 = (state.market === 'cn') ? '本页面图文由「云桨 · 一图全店」自动生成' : 'Generated by CloudPaddle · One Image, Full Store';
+  parts.push(`<text x="${W/2}" y="${y+68}" text-anchor="middle" font-size="9" fill="#fff" opacity="0.6" letter-spacing="2">${footerLine1}</text>`);
+  parts.push(`<text x="${W/2}" y="${y+86}" text-anchor="middle" font-size="8" fill="#fff" opacity="0.4">${footerLine2}</text>`);
   y += 100;
 
   const totalH = y;
@@ -2437,6 +2819,48 @@ async function downloadAssetCard(item, type, tab, idx) {
   }
 }
 
+// ---- Lightbox: 细节图放大查看 ----
+function openLightbox(item, type, tab, idx) {
+  const existing = document.getElementById('lightbox');
+  if (existing) existing.remove();
+
+  const overlay = document.createElement('div');
+  overlay.id = 'lightbox';
+  overlay.innerHTML = `
+    <div class="lb-backdrop"></div>
+    <div class="lb-content">
+      <button class="lb-close" title="关闭">×</button>
+      <div class="lb-image-wrap"></div>
+      <div class="lb-label"></div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+
+  // 生成高清 SVG 并转为图片显示
+  const svg = makeAssetSVG(item, type, tab, idx);
+  const wrap = overlay.querySelector('.lb-image-wrap');
+  const label = overlay.querySelector('.lb-label');
+  label.textContent = item.label + ' · 点击查看材质细节';
+
+  // 使用 blob URL 显示高清图
+  svgToBlob(svg, 1200, 1200).then(blob => {
+    const url = URL.createObjectURL(blob);
+    const img = document.createElement('img');
+    img.src = url;
+    img.alt = item.label;
+    wrap.appendChild(img);
+    // 清理
+    overlay.addEventListener('remove', () => URL.revokeObjectURL(url), { once: true });
+  });
+
+  // 关闭逻辑
+  const close = () => overlay.remove();
+  overlay.querySelector('.lb-close').addEventListener('click', close);
+  overlay.querySelector('.lb-backdrop').addEventListener('click', close);
+  overlay.addEventListener('keydown', (e) => { if (e.key === 'Escape') close(); });
+  overlay.focus();
+}
+
 async function downloadDetailImage() {
   try {
     const svgEl = $('detail-scroll').querySelector('svg');
@@ -2460,7 +2884,6 @@ const TAB_FOLDER = {
   main: '01_主图',
   scene: '02_场景图',
   detail: '03_细节图',
-  variant: '04_变体图',
 };
 
 async function downloadAllZip() {
@@ -2474,7 +2897,7 @@ async function downloadAllZip() {
   try {
     const zip = new JSZip();
 
-    // Add all 12 asset cards
+    // Add all 10 asset cards
     let total = 0;
     for (const tab of Object.keys(ASSETS)) {
       const folder = zip.folder(TAB_FOLDER[tab] || tab);
@@ -2485,7 +2908,7 @@ async function downloadAllZip() {
         const blob = await svgToBlob(svg, 1200, 1200);
         folder.file(`${item.label}.jpg`, blob);
         total++;
-        if (btn) btn.textContent = `打包中 ${total}/13`;
+        if (btn) btn.textContent = `打包中 ${total}/11`;
       }
     }
 
@@ -2496,9 +2919,9 @@ async function downloadAllZip() {
       const svgString = new XMLSerializer().serializeToString(detailEl);
       const scale = 2.5;
       const blob = await svgToBlob(svgString, vb[2] * scale, vb[3] * scale);
-      zip.file(`05_详情页/${state.edits.title || '商品'}_详情页.jpg`, blob);
+      zip.file(`04_详情页/${state.edits.title || '商品'}_详情页.jpg`, blob);
       total++;
-      if (btn) btn.textContent = `打包中 ${total}/13`;
+      if (btn) btn.textContent = `打包中 ${total}/11`;
     }
 
     // Add a manifest
@@ -2515,10 +2938,9 @@ async function downloadAllZip() {
       ' 01_主图/      × 5 张  (正面 / 45° / 侧面 / 俯视 / 背面)',
       ' 02_场景图/    × 3 张  (户外 / 室内 / 工作室)',
       ' 03_细节图/    × 2 张  (材质特写 / Logo 特写)',
-      ' 04_变体图/    × 2 张  (红色 / 蓝色)',
-      ' 05_详情页/    × 1 张  (长图)',
+      ' 04_详情页/    × 1 张  (长图)',
       '',
-      '总计: 13 张  ·  可直接上架淘宝 / 京东 / 抖音',
+      '总计: 11 张  ·  可直接上架淘宝 / 京东 / 抖音',
     ].join('\n');
     zip.file('清单.txt', manifest);
 
@@ -2526,7 +2948,7 @@ async function downloadAllZip() {
     const content = await zip.generateAsync({ type: 'blob', compression: 'DEFLATE', compressionOptions: { level: 4 } });
     const sizeKB = Math.round(content.size / 1024);
     triggerDownload(content, `${state.edits.title || '商品'}_全店素材.zip`);
-    toast(`已下载素材包 · 共 13 张 · ${sizeKB} KB`);
+    toast(`已下载素材包 · 共 11 张 · ${sizeKB} KB`);
   } catch (err) {
     console.error(err);
     toast('打包失败,请稍后再试');
@@ -2556,4 +2978,6 @@ setInterval(() => {
 }, 1000);
 
 // ============ Init ============
+renderHistoryList();
+renderPlatformButtons();
 selectSample('shoe');

@@ -11,6 +11,34 @@ const url = require('url');
 const PORT = parseInt(process.env.PORT || '8787', 10);
 const API_KEY = process.env.DASHSCOPE_API_KEY || readKeyFile();
 const STATIC_DIR = __dirname;
+const HISTORY_DIR = path.join(__dirname, 'history');
+
+// Ensure history directory exists
+if (!fs.existsSync(HISTORY_DIR)) {
+  fs.mkdirSync(HISTORY_DIR, { recursive: true });
+}
+
+// Download a remote file to local path
+async function downloadFile(remoteUrl, destPath) {
+  const res = await fetch(remoteUrl);
+  if (!res.ok) throw new Error(`download failed: ${res.status}`);
+  const buf = Buffer.from(await res.arrayBuffer());
+  fs.mkdirSync(path.dirname(destPath), { recursive: true });
+  fs.writeFileSync(destPath, buf);
+  return buf.length;
+}
+
+// Get file extension from URL or content-type
+function extFromUrl(u) {
+  try {
+    const p = new URL(u).pathname;
+    const ext = path.extname(p).toLowerCase();
+    if (ext) return ext;
+  } catch {}
+  if (u.includes('.glb')) return '.glb';
+  if (u.includes('.gltf')) return '.gltf';
+  return '.jpg';
+}
 
 function readKeyFile() {
   // 备用:从 .dashscope-key 文件读取(只用于本地开发,不要提交到 git)
@@ -79,11 +107,20 @@ async function handleApi(req, res, pathname) {
 
   try {
     // POST /api/3d/generate  — 启动 3D 生成任务
+    // Tripo input.image / input.images / input.prompt 三者互斥
     if (pathname === '/api/3d/generate' && req.method === 'POST') {
       const body = JSON.parse(await readBody(req) || '{}');
-      const input = body.image
-        ? { image: body.image, prompt: body.prompt || '' }
-        : (body.images && body.images.length ? { images: body.images, prompt: body.prompt || '' } : { prompt: body.prompt || '' });
+      let input;
+      if (body.image) {
+        // 图生 3D：只传 image，不传 prompt（互斥）
+        input = { image: body.image };
+      } else if (body.images && body.images.length) {
+        // 多图生 3D
+        input = { images: body.images };
+      } else {
+        // 文生 3D
+        input = { prompt: body.prompt || '' };
+      }
       const r = await callDashScope({
         url: TRIPO_URL,
         async: true,
@@ -144,18 +181,7 @@ async function handleApi(req, res, pathname) {
     if (pathname === '/api/analyze' && req.method === 'POST') {
       const body = JSON.parse(await readBody(req) || '{}');
       const image = body.image || '';
-      const r = await callDashScope({
-        url: 'https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation',
-        async: false,
-        body: {
-          model: 'qwen-vl-plus',
-          input: {
-            messages: [
-              {
-                role: 'user',
-                content: [
-                  { image },
-                  { text: `你是一位电商运营专家。请分析这张商品图片,以JSON格式返回以下字段:
+      const prompt = body.prompt || `你是一位电商运营专家。请分析这张商品图片,以JSON格式返回以下字段:
 {
   "brand": "建议的品牌英文名(1-2个单词)",
   "brandCn": "建议的品牌中文名(2个字,如'云舟')",
@@ -172,7 +198,19 @@ async function handleApi(req, res, pathname) {
     {"label": "适用", "value": "适用场景"}
   ]
 }
-只返回JSON,不要其他文字。` },
+只返回JSON,不要其他文字。`;
+      const r = await callDashScope({
+        url: 'https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation',
+        async: false,
+        body: {
+          model: 'qwen-vl-plus',
+          input: {
+            messages: [
+              {
+                role: 'user',
+                content: [
+                  { image },
+                  { text: prompt },
                 ],
               },
             ],
@@ -214,6 +252,68 @@ async function handleApi(req, res, pathname) {
       return;
     }
 
+    // POST /api/history/save  — 下载历史记录图片到本地
+    if (pathname === '/api/history/save' && req.method === 'POST') {
+      const body = JSON.parse(await readBody(req) || '{}');
+      const recordId = body.recordId || String(Date.now());
+      const images = body.images || {};
+      const modelUrl = body.modelUrl || null;
+      const recordDir = path.join(HISTORY_DIR, recordId);
+      fs.mkdirSync(recordDir, { recursive: true });
+
+      const saved = {};
+      let modelSaved = null;
+
+      // Download all images
+      for (const [slot, remoteUrl] of Object.entries(images)) {
+        if (!remoteUrl || typeof remoteUrl !== 'string') continue;
+        try {
+          const ext = extFromUrl(remoteUrl);
+          const filename = `${slot}${ext}`;
+          const dest = path.join(recordDir, filename);
+          await downloadFile(remoteUrl, dest);
+          saved[slot] = `/history/${recordId}/${filename}`;
+        } catch (err) {
+          console.error(`[history save] failed to download ${slot}:`, err.message);
+        }
+      }
+
+      // Download 3D model if exists
+      if (modelUrl) {
+        try {
+          const ext = extFromUrl(modelUrl) || '.glb';
+          const filename = `model${ext}`;
+          const dest = path.join(recordDir, filename);
+          await downloadFile(modelUrl, dest);
+          modelSaved = `/history/${recordId}/${filename}`;
+        } catch (err) {
+          console.error('[history save] failed to download model:', err.message);
+        }
+      }
+
+      res.writeHead(200);
+      res.end(JSON.stringify({ ok: true, recordId, saved, modelSaved }));
+      return;
+    }
+
+    // POST /api/history/delete  — 删除本地历史记录文件
+    if (pathname === '/api/history/delete' && req.method === 'POST') {
+      const body = JSON.parse(await readBody(req) || '{}');
+      const recordId = body.recordId;
+      if (!recordId) { res.writeHead(400); res.end('missing recordId'); return; }
+      const recordDir = path.join(HISTORY_DIR, String(recordId));
+      try {
+        if (fs.existsSync(recordDir)) {
+          fs.rmSync(recordDir, { recursive: true, force: true });
+        }
+      } catch (err) {
+        console.error('[history delete]', err.message);
+      }
+      res.writeHead(200);
+      res.end(JSON.stringify({ ok: true }));
+      return;
+    }
+
     res.writeHead(404);
     res.end(JSON.stringify({ error: 'route not found', path: pathname }));
   } catch (err) {
@@ -240,10 +340,29 @@ function handleStatic(req, res, pathname) {
   });
 }
 
+// Serve history files
+function handleHistory(req, res, pathname) {
+  const rel = pathname.replace(/^\/history\//, '');
+  const filePath = safeJoin(HISTORY_DIR, rel);
+  if (!filePath) { res.writeHead(403); res.end('Forbidden'); return; }
+  fs.stat(filePath, (err, stat) => {
+    if (err || !stat.isFile()) { res.writeHead(404); res.end('Not found'); return; }
+    const ext = path.extname(filePath).toLowerCase();
+    res.writeHead(200, {
+      'Content-Type': MIME[ext] || 'application/octet-stream',
+      'Cache-Control': 'public, max-age=86400',
+      'Access-Control-Allow-Origin': '*',
+    });
+    fs.createReadStream(filePath).pipe(res);
+  });
+}
+
 const server = http.createServer(async (req, res) => {
   const { pathname } = url.parse(req.url, true);
   if (pathname.startsWith('/api/')) {
     await handleApi(req, res, pathname);
+  } else if (pathname.startsWith('/history/')) {
+    handleHistory(req, res, pathname);
   } else {
     handleStatic(req, res, pathname);
   }
