@@ -39,10 +39,12 @@ const state = {
     variants: true,
     trust: true,
   },
-  mode: 'mock',           // 'mock' | 'real'  — 真实模式调 Tripo / Z-Image
+  mode: 'real',           // 'mock' | 'real'  — 真实模式调 Tripo / Z-Image
   realModelUrl: null,     // Tripo 返回的 GLB URL
   realAssets: {},         // 'category-idx' => image URL
   realHeroImage: null,    // 详情图 hero 用的 真实图
+  realBaseColor: null,    // 生成时使用的 SKU 标准色,变色功能用它做色相基准
+  recolorHue: 0,          // 本地变色时的色相偏移 (deg)
 };
 
 const SAMPLES = {
@@ -283,9 +285,17 @@ document.querySelectorAll('.color-btn').forEach(btn => {
     document.querySelectorAll('.color-btn').forEach(b => b.classList.remove('active'));
     btn.classList.add('active');
     state.color = btn.dataset.color;
-    if (state.productMesh) applyColor(state.productMesh, state.color);
-    renderAssetGrid(currentTab);
-    renderDetailImage();
+    // 真实生成完成后 — 本地变色,不重新调 API
+    const hasRealAssets = Object.keys(state.realAssets).length > 0;
+    if (state.mode === 'real' && hasRealAssets) {
+      applyLocalRecolor(state.color);
+      toast('本地变色完成 · 未调用 API');
+    } else {
+      // 演示模式 / 还未生成 — 走原有的程序化变色
+      if (state.productMesh) applyColor(state.productMesh, state.color);
+      renderAssetGrid(currentTab);
+      renderDetailImage();
+    }
   });
 });
 
@@ -327,11 +337,15 @@ document.querySelectorAll('.mode-btn').forEach(btn => {
     btn.classList.add('active');
     state.mode = btn.dataset.mode;
     if (state.mode === 'real') {
-      toast('真实生成模式 · 单次约 3-5 分钟,请耐心等待');
-      $('time-text').textContent = '真实生成 · 预计 3-5 分钟';
+      toast('真实生成 · Tripo 3D + Z-Image 文生图');
+      $('time-text').textContent = 'Tripo + Z-Image · 预计 2-3 分钟';
+      const est = document.querySelector('.preview-est');
+      if (est) est.textContent = '预计 2-3 分钟 · 真实调用 Tripo / Z-Image';
     } else {
-      toast('已切回演示模式');
-      $('time-text').textContent = '平均处理 4 分 47 秒';
+      toast('演示模式 · 瞬时生成');
+      $('time-text').textContent = '演示模式 · 流程演示无 API 调用';
+      const est = document.querySelector('.preview-est');
+      if (est) est.textContent = '演示模式 · 几秒钟跑完流程';
     }
   });
 });
@@ -489,6 +503,7 @@ async function runPipeline() {
   state.realModelUrl = null;
   state.realAssets = {};
   state.realHeroImage = null;
+  state.realBaseColor = null;
 
   if (state.mode === 'real') {
     await runRealPipeline();
@@ -521,10 +536,19 @@ async function runMockPipeline() {
 // ---- Real pipeline: call Tripo + Z-Image via /api proxy ----
 async function runRealPipeline() {
   const steps = document.querySelectorAll('.pipe-step');
+  // 生成时锁定 SKU 标准色作为变色功能的基准
+  state.realBaseColor = SAMPLES[state.productType]?.color || state.color;
   const productPrompt = makeProductPrompt(state.productType, state.color, state.edits);
+  const imagePrompts = makeAssetPrompts(state.productType, state.color, state.edits);
+
+  // ---- 状态条: 显示 + 初始化所有缩略图占位 ----
+  $('pipeline-statusbar').style.display = 'flex';
+  initStatusThumbs(imagePrompts);
+  const startTime = Date.now();
+  const phaseTimer = startPhaseRotator(startTime);
 
   try {
-    // ===== Step 1: kick off Tripo 3D =====
+    // ===== Step 1: 启动 Tripo 3D =====
     setStep(0, true);
     addLog(`提示词: ${productPrompt.short}`, 'info');
     addLog('提交 Tripo 3D 任务...', 'info');
@@ -532,62 +556,279 @@ async function runRealPipeline() {
     const tripoTaskId = await startTripoTask(productPrompt.full);
     if (!tripoTaskId) throw new Error('Tripo 任务启动失败');
     addLog(`Tripo task_id: ${tripoTaskId.slice(0, 12)}...`, 'ok');
-    setStepProgress(0, 30);
+    setStepProgress(0, 100);
 
-    // ===== Step 2: kick off Z-Image generations in parallel =====
+    // ===== Step 2: 并发提交全部 Z-Image 任务 =====
     setStep(1, true);
-    const imagePrompts = makeAssetPrompts(state.productType, state.color, state.edits);
-    addLog(`并发提交 ${imagePrompts.length} 个 Z-Image 任务...`, 'info');
+    addLog(`并发提交 ${imagePrompts.length} 个 Z-Image 任务 (主图 / 场景 / 细节 / 变体 / Hero)`, 'info');
+    let completed = 0;
+    const totalGens = imagePrompts.length;
 
-    const imagePromises = imagePrompts.map((p, idx) =>
-      callImageGen(p.prompt, '1024*1024').then(url => {
-        addLog(`✓ ${p.slot}  ${url ? '已就绪' : '无返回'}`, url ? 'ok' : 'warn');
-        if (url) {
-          if (p.slot.startsWith('main-')) state.realAssets[p.slot] = url;
+    // 启动 Tripo 轮询 (后台进行,不阻塞)
+    const tripoPromise = pollTaskUntilDone(tripoTaskId, 'Tripo 3D', (st, elapsed) => {
+      // step 2 进度条根据 Tripo 时间推进
+      // do nothing here, status bar 的 phaseTimer 已经在更新文案
+    });
+
+    // 并发跑所有图片生成 (限流 4,失败自动重试 2 次)
+    const gate = gateLimit(4);
+    const imagePromises = imagePrompts.map((p) => {
+      markThumb(p.slot, 'running');
+      return gate(() => callImageGenWithRetry(p.prompt, '1024*1024'))
+        .then(url => {
+          const elapsed = ((Date.now() - startTime) / 1000).toFixed(0);
+          state.realAssets[p.slot] = url;
           if (p.slot === 'hero') state.realHeroImage = url;
-          if (p.slot.startsWith('scene-')) state.realAssets[p.slot] = url;
-        }
-        setStepProgress(1, 20 + (idx + 1) * (80 / imagePrompts.length));
-        return { slot: p.slot, url };
-      }).catch(err => {
-        addLog(`× ${p.slot}  ${err.message || err}`, 'warn');
-        return { slot: p.slot, url: null };
-      })
-    );
+          markThumb(p.slot, 'done', url);
+          completed++;
+          updateThumbCount(completed, totalGens);
+          addLog(`✓ ${labelOfSlot(p.slot)}  已就绪  (${elapsed}s)`, 'ok');
+          setStepProgress(1, 10 + (completed / totalGens) * 90);
+          // 结果区已经展示时,实时刷新对应的卡片 / 详情图
+          if ($('step-result').style.display !== 'none') {
+            try {
+              renderAssetGrid(currentTab);
+              renderDetailImage();
+            } catch {}
+          }
+          return { slot: p.slot, url };
+        })
+        .catch(err => {
+          markThumb(p.slot, 'fail');
+          addLog(`× ${labelOfSlot(p.slot)}  ${err.message || err}`, 'warn');
+          return { slot: p.slot, url: null };
+        });
+    });
 
-    // ===== Step 3: poll Tripo (long-running) while images complete =====
+    // 等到至少 6 张图就绪就展示结果(不必等全 13 张)
+    await raceUntilCount(imagePromises, Math.min(6, imagePrompts.length));
     setStep(2, true);
-    addLog('开始轮询 Tripo (3-5 分钟)...', 'info');
-    const [glbUrl] = await Promise.all([
-      pollTaskUntilDone(tripoTaskId, 'Tripo 3D', (st, elapsed) => {
-        const pct = Math.min(95, elapsed / 1000 / 240 * 100); // ~4min target
-        setStepProgress(2, pct);
-        const lastLog = $('pipeline-log').lastElementChild;
-        if (!lastLog || !lastLog.textContent.includes('Tripo:')) {
-          addLog(`Tripo: ${st}`, 'info');
+    setStepProgress(1, (completed / totalGens) * 100);
+    addLog(`首批素材就绪 (${completed}/${totalGens}),提前展示`, 'ok');
+
+    // ===== Step 3: 提前展示结果,Tripo 继续在后台 =====
+    setPhase('套图就绪 · 3D 模型仍在生成,稍后自动加载');
+    showResult();
+    setStepProgress(2, 30);
+
+    // 后台等 Tripo 完成 (不阻塞 UI)
+    let tripoDone = false;
+    let imagesDone = false;
+    const finalize = () => {
+      if (!tripoDone || !imagesDone) return;
+      setPhase('全部完成');
+      clearInterval(phaseTimer);
+      const spinner = document.querySelector('.sb-spinner');
+      if (spinner) {
+        spinner.style.borderTopColor = '#16a34a';
+        spinner.style.animation = 'none';
+      }
+    };
+
+    tripoPromise.then(glbUrl => {
+      const elapsed = ((Date.now() - startTime) / 1000).toFixed(0);
+      if (glbUrl) {
+        state.realModelUrl = glbUrl;
+        addLog(`✓ Tripo GLB 就绪  (${elapsed}s)`, 'ok');
+        setStepProgress(2, 100);
+        setStep(3, true);
+        setStepProgress(3, 100);
+        if (state.scene) loadGLBIntoScene(glbUrl);
+        toast('3D 模型已加载完成');
+      } else {
+        addLog('Tripo 未返回 GLB,回退程序化模型', 'warn');
+        hideThreeLoading();
+        if (state.scene && !state.productMesh) {
+          const fallback = buildProductMesh(state.productType, state.color);
+          state.scene.add(fallback);
+          state.productMesh = fallback;
         }
-      }),
-      Promise.all(imagePromises),
-    ]);
+      }
+      tripoDone = true;
+      finalize();
+    }).catch(err => {
+      addLog('Tripo 失败: ' + (err.message || err), 'warn');
+      hideThreeLoading();
+      if (state.scene && !state.productMesh) {
+        const fallback = buildProductMesh(state.productType, state.color);
+        state.scene.add(fallback);
+        state.productMesh = fallback;
+      }
+      tripoDone = true;
+      finalize();
+    });
 
-    if (glbUrl) {
-      state.realModelUrl = glbUrl;
-      addLog(`✓ GLB 就绪: ${glbUrl.slice(0, 50)}...`, 'ok');
-    } else {
-      addLog('Tripo 未返回 GLB,回退使用程序化模型', 'warn');
-    }
+    // 等所有图片完成 (含重试 / 失败) 后再标"全部完成"
+    Promise.allSettled(imagePromises).then(() => {
+      addLog(`Z-Image 全部任务结束 (${completed}/${totalGens})`, completed === totalGens ? 'ok' : 'warn');
+      imagesDone = true;
+      finalize();
+      // 最后再刷一次,确保所有就绪的图都进入卡片
+      if ($('step-result').style.display !== 'none') {
+        try { renderAssetGrid(currentTab); renderDetailImage(); } catch {}
+      }
+    });
 
-    // ===== Step 4: assemble =====
-    setStep(3, true);
-    setStepProgress(3, 100);
-    addLog('装配套图模版 + 详情图...', 'info');
-    await sleep(400);
-    addLog('全部生成完毕 ✓', 'ok');
+    // 让 runPipeline 立刻结束 (Tripo 在后台跑)
   } catch (err) {
     console.error('real pipeline error', err);
-    addLog('错误: ' + (err.message || err), 'warn');
-    toast('真实生成失败,回退演示效果');
+    const msg = String(err.message || err);
+    addLog('错误: ' + msg, 'warn');
+    if (/not activated|未开通/i.test(msg)) {
+      toast('Tripo 模型未在账号下开通,请到百炼控制台「模型市场」开通后重试');
+    } else {
+      toast('真实生成失败:' + msg.slice(0, 60));
+    }
+    clearInterval(phaseTimer);
   }
+}
+
+// ============ 实时状态条 ============
+function labelOfSlot(slot) {
+  const map = {
+    'main-0': '主图 正面', 'main-1': '主图 45°', 'main-2': '主图 侧面', 'main-3': '主图 俯视', 'main-4': '主图 背面',
+    'scene-0': '场景 户外', 'scene-1': '场景 室内', 'scene-2': '场景 工作室',
+    'detail-0': '细节 材质', 'detail-1': '细节 Logo',
+    'variant-0': '变体 红', 'variant-1': '变体 蓝',
+    'hero': '详情 Hero',
+  };
+  return map[slot] || slot;
+}
+
+function slotMatchesTab(slot, tab) {
+  return slot.startsWith(tab + '-') || (tab === 'main' && slot === 'hero');
+}
+
+function initStatusThumbs(prompts) {
+  const wrap = $('sb-thumbs');
+  wrap.innerHTML = '';
+  // 紧凑显示 5+3+2+2+1 = 13,但只显示前 8 个用 +N 表示其余
+  const shown = prompts.slice(0, 8);
+  shown.forEach(p => {
+    const t = document.createElement('div');
+    t.className = 'sb-thumb pending';
+    t.dataset.slot = p.slot;
+    t.title = labelOfSlot(p.slot);
+    wrap.appendChild(t);
+  });
+  if (prompts.length > 8) {
+    const more = document.createElement('div');
+    more.className = 'sb-thumb pending';
+    more.textContent = '+' + (prompts.length - 8);
+    wrap.appendChild(more);
+  }
+  updateThumbCount(0, prompts.length);
+}
+
+function markThumb(slot, status, url) {
+  const wrap = $('sb-thumbs');
+  if (!wrap) return;
+  const t = wrap.querySelector(`[data-slot="${slot}"]`);
+  if (!t) return;
+  t.classList.remove('pending', 'running', 'done', 'fail');
+  t.classList.add(status);
+  if (status === 'done' && url) {
+    t.innerHTML = `<img src="${proxyImageUrl(url)}" alt="" referrerpolicy="no-referrer">`;
+  } else if (status === 'fail') {
+    t.textContent = '!';
+  }
+}
+
+function updateThumbCount(done, total) {
+  const el = $('sb-count');
+  if (el) el.textContent = `${done}/${total}`;
+}
+
+function setPhase(text) {
+  const el = $('sb-phase');
+  if (el) el.textContent = text;
+}
+
+// ============ 并发限流闸门 ============
+function gateLimit(concurrency = 4) {
+  const queue = [];
+  let running = 0;
+  function pump() {
+    while (running < concurrency && queue.length > 0) {
+      const job = queue.shift();
+      running++;
+      Promise.resolve()
+        .then(job.fn)
+        .then(job.resolve, job.reject)
+        .finally(() => { running--; pump(); });
+    }
+  }
+  return function wrap(fn) {
+    return new Promise((resolve, reject) => {
+      queue.push({ fn, resolve, reject });
+      pump();
+    });
+  };
+}
+
+// 带重试的 Z-Image 调用
+async function callImageGenWithRetry(prompt, size, retries = 2, retryDelay = 2500) {
+  let lastErr;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const url = await callImageGen(prompt, size);
+      if (url) return url;
+      throw new Error('empty url');
+    } catch (err) {
+      lastErr = err;
+      if (attempt < retries) {
+        await sleep(retryDelay * (attempt + 1));
+      }
+    }
+  }
+  throw lastErr;
+}
+
+function raceUntilCount(promises, n) {
+  let done = 0;
+  return new Promise(resolve => {
+    if (n <= 0 || promises.length === 0) return resolve();
+    promises.forEach(p => Promise.resolve(p).then(() => {
+      if (++done >= n) resolve();
+    }, () => {
+      if (++done >= n) resolve();
+    }));
+  });
+}
+
+function startPhaseRotator(startTime) {
+  const phases = [
+    [0,   '提交任务,准备资源'],
+    [12,  '解析提示词 · 加载 Tripo 模型'],
+    [25,  '粗几何重建中'],
+    [50,  '网格细化 14,832 → 28,400 面'],
+    [80,  'UV 展开 + 材质烘焙'],
+    [110, 'PBR 纹理生成'],
+    [140, '导出 GLB · 收尾中'],
+    [170, '即将完成,正在压缩'],
+  ];
+
+  function fmt(s) {
+    const m = Math.floor(s / 60);
+    const r = s % 60;
+    return `${m}:${String(r).padStart(2, '0')}`;
+  }
+
+  function tick() {
+    const elapsed = Math.floor((Date.now() - startTime) / 1000);
+    let cur = phases[0][1];
+    for (const [t, txt] of phases) {
+      if (elapsed >= t) cur = txt;
+    }
+    setPhase(cur);
+    const elapsedEl = $('sb-elapsed');
+    if (elapsedEl) elapsedEl.textContent = `已运行 ${fmt(elapsed)}`;
+    const eta = Math.max(0, 150 - elapsed);
+    const etaEl = $('sb-eta');
+    if (etaEl) etaEl.textContent = eta > 0 ? `预计还需 ${fmt(eta)}` : '即将完成';
+  }
+  tick();
+  return setInterval(tick, 1000);
 }
 
 function setStep(idx, active) {
@@ -614,12 +855,14 @@ function setStepProgress(idx, pct) {
 }
 
 // ---- Prompt builders ----
+// 真实生成使用 SKU 自带的"标准色",与用户在调色板里挑的颜色无关 — 颜色后处理
 function makeProductPrompt(type, color, edits) {
+  const baseColor = SAMPLES[type]?.color || color;
   const colorWords = {
     '#c0392b': 'red', '#2c5f8d': 'blue', '#3a7d44': 'green',
     '#d4a017': 'yellow gold', '#2c2c2c': 'black', '#5b3a8a': 'purple',
   };
-  const c = colorWords[color] || 'colored';
+  const c = colorWords[baseColor] || 'colored';
   const title = edits.title || '';
   const base = {
     shoe:    `a modern ${c} running sneaker, sleek design, sport shoe, 3d model, isolated on white`,
@@ -632,21 +875,32 @@ function makeProductPrompt(type, color, edits) {
 }
 
 function makeAssetPrompts(type, color, edits) {
+  const baseColor = SAMPLES[type]?.color || color;
   const colorWords = {
     '#c0392b': '红色', '#2c5f8d': '蓝色', '#3a7d44': '绿色',
     '#d4a017': '金黄色', '#2c2c2c': '黑色', '#5b3a8a': '紫色',
   };
-  const c = colorWords[color] || '彩色';
+  const c = colorWords[baseColor] || '彩色';
   const productCn = {
     shoe: '运动跑鞋', bag: '手提包', bottle: '保温水杯', chair: '人体工学办公椅', jewelry: '钻石戒指',
   }[type] || '商品';
-  const baseStyle = '电商商品摄影, 简洁干净, 高质量, 8K, 锐利清晰';
+  const baseStyle = '电商商品摄影, 简洁干净, 高质量, 8K, 锐利清晰, 无水印';
+  const whiteBg = '纯白背景, 摄影棚灯光';
 
   return [
-    { slot: 'main-0', prompt: `一双${c}${productCn}, 正面平拍, 纯白背景, ${baseStyle}` },
-    { slot: 'main-1', prompt: `一双${c}${productCn}, 45度斜视角, 纯白背景, ${baseStyle}` },
-    { slot: 'main-2', prompt: `一双${c}${productCn}, 侧面视角, 纯白背景, ${baseStyle}` },
-    { slot: 'hero',   prompt: `一双${c}${productCn}, 极具质感的产品大图, 纯白背景, 顶级电商主图, ${baseStyle}` },
+    { slot: 'main-0', prompt: `${c}${productCn}, 正面平拍, ${whiteBg}, ${baseStyle}` },
+    { slot: 'main-1', prompt: `${c}${productCn}, 45度斜视角, ${whiteBg}, ${baseStyle}` },
+    { slot: 'main-2', prompt: `${c}${productCn}, 侧面视角, ${whiteBg}, ${baseStyle}` },
+    { slot: 'main-3', prompt: `${c}${productCn}, 俯视角度, ${whiteBg}, ${baseStyle}` },
+    { slot: 'main-4', prompt: `${c}${productCn}, 背面视角, ${whiteBg}, ${baseStyle}` },
+    { slot: 'scene-0', prompt: `${c}${productCn}, 户外阳光场景, 自然光摄影, 生活方式, ${baseStyle}` },
+    { slot: 'scene-1', prompt: `${c}${productCn}, 现代室内场景, 暖色调, 生活方式摄影, ${baseStyle}` },
+    { slot: 'scene-2', prompt: `${c}${productCn}, 工作室深色背景, 戏剧化布光, ${baseStyle}` },
+    { slot: 'detail-0', prompt: `${c}${productCn} 材质特写, 微距摄影, ${whiteBg}, ${baseStyle}` },
+    { slot: 'detail-1', prompt: `${c}${productCn} Logo 区域特写, 微距, ${whiteBg}, ${baseStyle}` },
+    { slot: 'variant-0', prompt: `红色${productCn}, 45度视角, ${whiteBg}, ${baseStyle}` },
+    { slot: 'variant-1', prompt: `蓝色${productCn}, 45度视角, ${whiteBg}, ${baseStyle}` },
+    { slot: 'hero', prompt: `${c}${productCn}, 极具质感的产品大图, ${whiteBg}, 顶级电商主图, ${baseStyle}` },
   ];
 }
 
@@ -695,12 +949,17 @@ async function pollTaskUntilDone(taskId, label = 'task', onProgress, intervalMs 
       lastStatus = status;
     }
     if (status === 'SUCCEEDED') {
-      // Tripo 返回结构里 GLB URL 通常在 output.result_url / model_url / glb_url
+      // 阿里云百炼 Tripo 的 GLB URL 在 output.results[0].pbr_model_url
       const out = data.output;
-      return out.output_glb_url || out.result?.glb_url || out.result_url || out.results?.[0]?.url || null;
+      return out.results?.[0]?.pbr_model_url
+          || out.results?.[0]?.model_url
+          || out.results?.[0]?.url
+          || out.output_glb_url
+          || null;
     }
     if (status === 'FAILED' || status === 'CANCELED') {
-      throw new Error(`${label} ${status}: ${JSON.stringify(data.output?.code || data.output?.message || '')}`);
+      const out = data.output || {};
+      throw new Error(`${label} ${status}: ${out.code || ''} ${out.message || ''}`.trim());
     }
   }
   throw new Error(`${label} 超时`);
@@ -724,13 +983,27 @@ function showResult() {
   $('step-result').style.display = 'block';
   $('step-result').scrollIntoView({ behavior: 'smooth', block: 'start' });
 
-  const fakeSec = 280 + Math.floor(Math.random() * 30);
-  const mm = String(Math.floor(fakeSec / 60)).padStart(2, '0');
-  const ss = String(fakeSec % 60).padStart(2, '0');
-  $('elapsed').textContent = `${mm}:${ss}`;
+  // 在真实模式下显示真实耗时;否则显示假数据
+  if (state.mode === 'real' && state.startTime) {
+    const sec = Math.floor((Date.now() - state.startTime) / 1000);
+    const mm = String(Math.floor(sec / 60)).padStart(2, '0');
+    const ss = String(sec % 60).padStart(2, '0');
+    $('elapsed').textContent = `${mm}:${ss}`;
+  } else {
+    const fakeSec = 280 + Math.floor(Math.random() * 30);
+    const mm = String(Math.floor(fakeSec / 60)).padStart(2, '0');
+    const ss = String(fakeSec % 60).padStart(2, '0');
+    $('elapsed').textContent = `${mm}:${ss}`;
+  }
 
-  initThreeJS();
-  renderAssetGrid('main');
+  // 幂等:已经初始化过 3D 场景就不重置 (避免覆盖已加载的 GLB)
+  if (!state.scene) {
+    initThreeJS();
+  } else if (state.realModelUrl && !state.productMesh?.isObject3D) {
+    // 边界情况:scene 在但 mesh 丢了 — 重新加载
+    loadGLBIntoScene(state.realModelUrl);
+  }
+  renderAssetGrid(currentTab || 'main');
   renderDetailImage();
 }
 
@@ -779,9 +1052,13 @@ function initThreeJS() {
   ground.receiveShadow = true;
   scene.add(ground);
 
-  // Product mesh
-  const product = buildProductMesh(state.productType, state.color);
-  scene.add(product);
+  // Product mesh — 真实模式没拿到 GLB 之前显示 loading 占位,不放程序化模型
+  const isRealWaiting = state.mode === 'real' && !state.realModelUrl;
+  let product = null;
+  if (!isRealWaiting) {
+    product = buildProductMesh(state.productType, state.color);
+    scene.add(product);
+  }
 
   // Controls
   const controls = new THREE.OrbitControls(camera, renderer.domElement);
@@ -794,6 +1071,10 @@ function initThreeJS() {
   controls.target.set(0, 0, 0);
 
   Object.assign(state, { scene, camera, renderer, controls, productMesh: product });
+
+  if (isRealWaiting) {
+    showThreeLoading();
+  }
 
   // If we have a real GLB from Tripo, swap in
   if (state.realModelUrl) {
@@ -840,14 +1121,54 @@ function loadGLBIntoScene(url) {
       model.traverse(o => { if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; } });
       state.scene.add(model);
       state.productMesh = model;
+      hideThreeLoading();
       toast('3D 模型加载完成');
     },
     undefined,
     (err) => {
       console.error('GLB load error', err);
+      hideThreeLoading();
       toast('GLB 加载失败 (跨域?),保留程序化模型');
     }
   );
+}
+
+function showThreeLoading() {
+  const container = $('three-canvas');
+  if (!container) return;
+  let overlay = container.querySelector('.three-loading');
+  if (!overlay) {
+    overlay = document.createElement('div');
+    overlay.className = 'three-loading';
+    overlay.innerHTML = `
+      <div class="tl-spinner"></div>
+      <div class="tl-text">Tripo 3D 模型生成中</div>
+      <div class="tl-sub">通常 1-3 分钟 · 完成后自动加载</div>
+      <div class="tl-progress"><div class="tl-bar"></div></div>
+    `;
+    container.appendChild(overlay);
+  }
+  overlay.style.display = 'flex';
+  // 同步进度条 — 基于 Tripo 已运行时间预估 (假定平均 150s)
+  if (!state._tlInterval) {
+    state._tlInterval = setInterval(() => {
+      const el = container.querySelector('.tl-bar');
+      const elapsed = state.startTime ? (Date.now() - state.startTime) / 1000 : 0;
+      const pct = Math.min(95, (elapsed / 150) * 100);
+      if (el) el.style.width = pct + '%';
+    }, 500);
+  }
+}
+
+function hideThreeLoading() {
+  const container = $('three-canvas');
+  if (!container) return;
+  const overlay = container.querySelector('.three-loading');
+  if (overlay) overlay.remove();
+  if (state._tlInterval) {
+    clearInterval(state._tlInterval);
+    state._tlInterval = null;
+  }
 }
 
 function buildProductMesh(type, color) {
@@ -1223,11 +1544,25 @@ function makeAssetSVG(item, type, category, idx) {
 
   // Use real image if available for this slot
   const realKey = `${category}-${idx}`;
-  const realUrl = state.realAssets[realKey] || (category === 'main' && idx >= 3 ? state.realAssets[`main-${idx % 3}`] : null);
+  const realUrl = state.realAssets[realKey];
+
   let productSVG;
   if (realUrl) {
     const safe = escAttr(proxyImageUrl(realUrl));
     productSVG = `<image href="${safe}" x="20" y="20" width="160" height="160" preserveAspectRatio="xMidYMid meet" crossorigin="anonymous"/>`;
+  } else if (state.mode === 'real') {
+    // 真实模式但此 slot 还没出图 — 显示 loading 占位
+    productSVG = `
+      <rect x="20" y="20" width="160" height="160" rx="6" fill="#f1f1f4">
+        <animate attributeName="fill" values="#f1f1f4;#e2e2e8;#f1f1f4" dur="1.6s" repeatCount="indefinite"/>
+      </rect>
+      <g transform="translate(100,98)">
+        <circle r="14" fill="none" stroke="#c8c8d0" stroke-width="2.5" stroke-dasharray="22 22" stroke-linecap="round">
+          <animateTransform attributeName="transform" type="rotate" from="0" to="360" dur="1.2s" repeatCount="indefinite"/>
+        </circle>
+      </g>
+      <text x="100" y="138" text-anchor="middle" font-size="9" fill="#9999a8" letter-spacing="1">生成中...</text>
+    `;
   } else {
     productSVG = productAsSVG(type, color, item.angle || 0, item.zoom || 1);
   }
@@ -1336,6 +1671,19 @@ function renderDetailImage() {
     if (state.realHeroImage) {
       const heroUrl = escAttr(proxyImageUrl(state.realHeroImage));
       parts.push(`<image href="${heroUrl}" x="${W/2 - 140}" y="${y + 120}" width="280" height="280" preserveAspectRatio="xMidYMid meet" crossorigin="anonymous"/>`);
+    } else if (state.mode === 'real') {
+      // 真实模式但 hero 图还没生成完 — 显示 loading 占位
+      parts.push(`
+        <rect x="${W/2 - 130}" y="${y + 140}" width="260" height="260" rx="8" fill="#ececf2">
+          <animate attributeName="fill" values="#ececf2;#dcdce4;#ececf2" dur="1.6s" repeatCount="indefinite"/>
+        </rect>
+        <g transform="translate(${W/2}, ${y + 260})">
+          <circle r="22" fill="none" stroke="#b5b5c0" stroke-width="3" stroke-dasharray="36 36" stroke-linecap="round">
+            <animateTransform attributeName="transform" type="rotate" from="0" to="360" dur="1.2s" repeatCount="indefinite"/>
+          </circle>
+        </g>
+        <text x="${W/2}" y="${y + 320}" text-anchor="middle" font-size="11" fill="#9999a8" letter-spacing="2">主图生成中</text>
+      `);
     } else {
       parts.push(productAsSVG(state.productType, state.color, 25, 2.4, W/2, y + 250));
     }
@@ -1395,7 +1743,7 @@ function renderDetailImage() {
     const fill = bgFill(tpl.bgScenes[sceneIdx], 'detail-scene-bg');
     parts.push(`<rect x="0" y="${y}" width="${W}" height="${h}" fill="${fill}"/>`);
     parts.push(`<text x="${W/2}" y="${y+50}" text-anchor="middle" font-size="11" letter-spacing="4" fill="#fff" opacity="0.85">LIFESTYLE · 场 景 应 用</text>`);
-    parts.push(productAsSVG(state.productType, state.color, 30, 2.4, W/2, y + 270));
+    parts.push(detailImageOrLoading('scene-0', W/2 - 130, y + 80, 260, 360, { angle: 30, zoom: 2.4 }));
     // Quote frame
     parts.push(`<text x="60" y="${y+470}" font-size="32" fill="#fff" opacity="0.45" font-family="Georgia, serif">"</text>`);
     parts.push(`<text x="${W/2}" y="${y+475}" text-anchor="middle" font-size="17" font-weight="700" fill="#fff" letter-spacing="3">随 心 出 行</text>`);
@@ -1408,8 +1756,25 @@ function renderDetailImage() {
   if (sec.material) {
     const h = 320;
     parts.push(`<rect x="0" y="${y}" width="${W}" height="${h}" fill="#ffffff"/>`);
-    parts.push(`<rect x="20" y="${y+30}" width="160" height="260" fill="#fafafa" stroke="#e8e8e8" stroke-width="1"/>`);
-    parts.push(productAsSVG(state.productType, state.color, 60, 1.4, 100, y + 160));
+    // 在材质段用真实的"细节-材质"图(状态条标的 detail-0)
+    const matUrl = state.realAssets['detail-0'];
+    if (matUrl) {
+      parts.push(`<image href="${escAttr(proxyImageUrl(matUrl))}" x="20" y="${y+30}" width="160" height="260" preserveAspectRatio="xMidYMid slice" crossorigin="anonymous"/>`);
+      parts.push(`<rect x="20" y="${y+30}" width="160" height="260" fill="none" stroke="#e8e8e8" stroke-width="1"/>`);
+    } else if (state.mode === 'real') {
+      parts.push(`<rect x="20" y="${y+30}" width="160" height="260" fill="#ececf2" stroke="#e8e8e8" stroke-width="1">
+        <animate attributeName="fill" values="#ececf2;#dcdce4;#ececf2" dur="1.8s" repeatCount="indefinite"/>
+      </rect>
+      <g transform="translate(100, ${y+150})">
+        <circle r="16" fill="none" stroke="#b5b5c0" stroke-width="2.5" stroke-dasharray="26 26" stroke-linecap="round">
+          <animateTransform attributeName="transform" type="rotate" from="0" to="360" dur="1.2s" repeatCount="indefinite"/>
+        </circle>
+      </g>
+      <text x="100" y="${y+195}" text-anchor="middle" font-size="9" fill="#9999a8">材质特写生成中</text>`);
+    } else {
+      parts.push(`<rect x="20" y="${y+30}" width="160" height="260" fill="#fafafa" stroke="#e8e8e8" stroke-width="1"/>`);
+      parts.push(productAsSVG(state.productType, state.color, 60, 1.4, 100, y + 160));
+    }
     // Side text
     parts.push(`<text x="${W/2+30}" y="${y+80}" font-size="11" letter-spacing="3" fill="${priceColor}">DETAIL · 材 质</text>`);
     parts.push(`<text x="${W/2+30}" y="${y+115}" font-size="20" font-weight="800" fill="#222">极 致 工 艺</text>`);
@@ -1429,8 +1794,23 @@ function renderDetailImage() {
     parts.push(`<rect x="0" y="${y}" width="${W}" height="${h}" fill="#f5f5f0"/>`);
     parts.push(`<text x="${W/2}" y="${y+42}" text-anchor="middle" font-size="13" font-weight="700" letter-spacing="6" fill="#333">- 细 节 解 析 -</text>`);
     parts.push(`<text x="${W/2}" y="${y+60}" text-anchor="middle" font-size="9" letter-spacing="4" fill="#888">DETAIL VIEW</text>`);
-    // Product centered
-    parts.push(productAsSVG(state.productType, state.color, 20, 1.8, W/2, y + 230));
+    // 主图 45° 真实图(没就绪时 loading;mock 时程序化)
+    const annUrl = state.realAssets['main-1'];
+    const annCx = W/2, annCy = y + 230;
+    if (annUrl) {
+      parts.push(`<image href="${escAttr(proxyImageUrl(annUrl))}" x="${annCx - 120}" y="${annCy - 100}" width="240" height="200" preserveAspectRatio="xMidYMid meet" crossorigin="anonymous"/>`);
+    } else if (state.mode === 'real') {
+      parts.push(`<rect x="${annCx - 120}" y="${annCy - 100}" width="240" height="200" rx="6" fill="#ececf2">
+        <animate attributeName="fill" values="#ececf2;#dcdce4;#ececf2" dur="1.8s" repeatCount="indefinite"/>
+      </rect>
+      <g transform="translate(${annCx},${annCy})">
+        <circle r="18" fill="none" stroke="#b5b5c0" stroke-width="2.5" stroke-dasharray="28 28" stroke-linecap="round">
+          <animateTransform attributeName="transform" type="rotate" from="0" to="360" dur="1.2s" repeatCount="indefinite"/>
+        </circle>
+      </g>`);
+    } else {
+      parts.push(productAsSVG(state.productType, state.color, 20, 1.8, annCx, annCy));
+    }
     // 3 callouts pointing at product
     const callouts = [
       { cx: 60,  cy: y + 150, lineTo: { x: 160, y: y + 200 }, label: e.slogans[0], desc: e.sloganDescs[0] },
@@ -1438,19 +1818,14 @@ function renderDetailImage() {
       { cx: 200, cy: y + 360, lineTo: { x: 200, y: y + 290 }, label: e.slogans[2], desc: e.sloganDescs[2] },
     ];
     callouts.forEach((c, i) => {
-      // Connector line (dashed)
       parts.push(`<line x1="${c.cx}" y1="${c.cy}" x2="${c.lineTo.x}" y2="${c.lineTo.y}" stroke="${priceColor}" stroke-width="1" stroke-dasharray="3 3" opacity="0.7"/>`);
-      // Endpoint dot on product
       parts.push(`<circle cx="${c.lineTo.x}" cy="${c.lineTo.y}" r="3" fill="${priceColor}"/>`);
       parts.push(`<circle cx="${c.lineTo.x}" cy="${c.lineTo.y}" r="6" fill="${priceColor}" opacity="0.3"/>`);
-      // Numbered circle
       parts.push(`<circle cx="${c.cx}" cy="${c.cy}" r="16" fill="#fff" stroke="${priceColor}" stroke-width="2"/>`);
       parts.push(`<text x="${c.cx}" y="${c.cy+5}" text-anchor="middle" font-size="13" font-weight="800" fill="${priceColor}">${i+1}</text>`);
-      // Label text positioned away from the line endpoint
       const textX = c.cx < W/2 ? c.cx + 22 : (c.cx > W*0.7 ? c.cx - 22 : c.cx);
       const textAnchor = c.cx < W/2 ? 'start' : (c.cx > W*0.7 ? 'end' : 'middle');
       const labelY = c.cy === y + 360 ? c.cy - 32 : c.cy - 20;
-      const descY = c.cy === y + 360 ? c.cy - 16 : c.cy + 30;
       if (c.cy === y + 360) {
         parts.push(`<text x="${W/2}" y="${c.cy - 32}" text-anchor="middle" font-size="11" font-weight="700" fill="#222">${esc(c.label || '')}</text>`);
         parts.push(`<text x="${W/2}" y="${c.cy - 16}" text-anchor="middle" font-size="9" fill="#666">${esc(c.desc || '')}</text>`);
@@ -1623,6 +1998,30 @@ function esc(s) {
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;');
+}
+
+// 详情图小工具:优先用真实图,真实模式没就绪时显示 loading,否则程序化
+function detailImageOrLoading(slot, x, y, w, h, productArgs) {
+  const url = state.realAssets[slot];
+  if (url) {
+    return `<image href="${escAttr(proxyImageUrl(url))}" x="${x}" y="${y}" width="${w}" height="${h}" preserveAspectRatio="xMidYMid meet" crossorigin="anonymous"/>`;
+  }
+  if (state.mode === 'real') {
+    const cx = x + w / 2;
+    const cy = y + h / 2;
+    return `
+      <rect x="${x}" y="${y}" width="${w}" height="${h}" rx="6" fill="rgba(255,255,255,0.12)" stroke="rgba(255,255,255,0.35)" stroke-width="1" stroke-dasharray="4 4">
+        <animate attributeName="fill" values="rgba(255,255,255,0.12);rgba(255,255,255,0.25);rgba(255,255,255,0.12)" dur="1.8s" repeatCount="indefinite"/>
+      </rect>
+      <g transform="translate(${cx},${cy - 6})">
+        <circle r="${Math.min(18, w/10)}" fill="none" stroke="rgba(255,255,255,0.7)" stroke-width="2.5" stroke-dasharray="28 28" stroke-linecap="round">
+          <animateTransform attributeName="transform" type="rotate" from="0" to="360" dur="1.2s" repeatCount="indefinite"/>
+        </circle>
+      </g>
+      <text x="${cx}" y="${cy + 26}" text-anchor="middle" font-size="10" fill="rgba(255,255,255,0.75)" letter-spacing="1">生成中</text>
+    `;
+  }
+  return productAsSVG(state.productType, state.color, productArgs.angle, productArgs.zoom, x + w/2, y + h/2);
 }
 
 function productAsSVG(type, color, angle, zoom, cx = 100, cy = 110) {

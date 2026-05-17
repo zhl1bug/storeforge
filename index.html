@@ -21,12 +21,12 @@
     </div>
   </div>
   <div class="mode-switch">
-    <button class="mode-btn active" data-mode="mock">演示模式</button>
-    <button class="mode-btn" data-mode="real">真实生成 <span class="mode-tip">(调用 Tripo / Z-Image)</span></button>
+    <button class="mode-btn active" data-mode="real">真实生成 <span class="mode-tip">Tripo · Z-Image</span></button>
+    <button class="mode-btn" data-mode="mock">演示模式</button>
   </div>
   <div class="time-badge">
     <span class="dot"></span>
-    <span id="time-text">平均处理 4 分 47 秒</span>
+    <span id="time-text">Tripo + Z-Image · 预计 2-3 分钟</span>
   </div>
 </header>
 
@@ -57,19 +57,34 @@
     </div>
 
     <div class="sample-row">
-      <span class="sample-label">试试样例</span>
-      <button class="sample-btn" data-sample="shoe">运动鞋</button>
-      <button class="sample-btn" data-sample="bag">手提包</button>
-      <button class="sample-btn" data-sample="bottle">保温杯</button>
-      <button class="sample-btn" data-sample="chair">座椅</button>
-      <button class="sample-btn" data-sample="jewelry">珠宝</button>
+      <span class="sample-label">SKU</span>
+      <button class="sample-btn" data-sample="shoe">
+        <span class="sku-code">001</span>
+        <span class="sku-name">Air Runner · 运动鞋</span>
+      </button>
+      <button class="sample-btn" data-sample="bag">
+        <span class="sku-code">002</span>
+        <span class="sku-name">Cloud Tote · 手提包</span>
+      </button>
+      <button class="sample-btn" data-sample="bottle">
+        <span class="sku-code">003</span>
+        <span class="sku-name">Titan Bottle · 保温杯</span>
+      </button>
+      <button class="sample-btn" data-sample="chair">
+        <span class="sku-code">004</span>
+        <span class="sku-name">Ergo Pro · 办公椅</span>
+      </button>
+      <button class="sample-btn" data-sample="jewelry">
+        <span class="sku-code">005</span>
+        <span class="sku-name">Bloom Ring · 钻石戒指</span>
+      </button>
     </div>
 
     <div class="preview-row" id="preview-row" style="display:none">
       <img id="preview-img" alt="预览">
       <div class="preview-meta">
         <div class="preview-name" id="preview-name">运动鞋</div>
-        <div class="preview-est">预计耗时 4-5 分钟</div>
+        <div class="preview-est">预计 2-3 分钟 · 真实调用 Tripo / Z-Image</div>
       </div>
       <button class="cta-btn" id="start-btn">开始生成</button>
     </div>
@@ -107,6 +122,25 @@
         <div class="pipe-progress"><div class="pipe-bar"></div></div>
       </div>
     </div>
+
+    <div class="pipeline-statusbar" id="pipeline-statusbar" style="display:none">
+      <div class="sb-left">
+        <div class="sb-spinner"></div>
+        <div class="sb-text">
+          <div class="sb-phase" id="sb-phase">提交任务,准备资源</div>
+          <div class="sb-meta">
+            <span id="sb-elapsed">已运行 0:00</span>
+            <span class="sb-dot">·</span>
+            <span id="sb-eta">预计 2-3 分钟</span>
+          </div>
+        </div>
+      </div>
+      <div class="sb-right">
+        <div class="sb-thumbs" id="sb-thumbs"></div>
+        <div class="sb-count" id="sb-count">0/5</div>
+      </div>
+    </div>
+
     <div class="pipeline-log" id="pipeline-log"></div>
   </section>
 

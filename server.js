@@ -147,7 +147,12 @@ async function handleApi(req, res, pathname) {
       // 仅允许 aliyun 系域名,避免被滥用作开放代理
       let host;
       try { host = new URL(targetUrl).hostname; } catch { res.writeHead(400); res.end('bad url'); return; }
-      const allowed = host.endsWith('.aliyuncs.com') || host.endsWith('.aliyun.com') || host === 'aliyuncs.com' || host === 'aliyun.com';
+      const allowed = host.endsWith('.aliyuncs.com')
+                   || host.endsWith('.aliyun.com')
+                   || host === 'aliyuncs.com'
+                   || host === 'aliyun.com'
+                   || host.endsWith('.tripo3d.com')
+                   || host === 'tripo3d.com';
       if (!allowed) {
         res.writeHead(403); res.end(JSON.stringify({ error: 'host not allowed', host }));
         return;
