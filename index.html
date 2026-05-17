@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>商品 3D 化与素材生成</title>
+<link rel="stylesheet" href="styles.css">
+<script src="https://cdn.jsdelivr.net/npm/three@0.146.0/build/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.146.0/examples/js/controls/OrbitControls.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.146.0/examples/js/loaders/GLTFLoader.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="logo">云</span>
+    <div class="brand-text">
+      <span class="brand-name">云桨 · 一图全店</span>
+      <span class="brand-slogan">单图进,全店出</span>
+    </div>
+  </div>
+  <div class="mode-switch">
+    <button class="mode-btn active" data-mode="mock">演示模式</button>
+    <button class="mode-btn" data-mode="real">真实生成 <span class="mode-tip">(调用 Tripo / Z-Image)</span></button>
+  </div>
+  <div class="time-badge">
+    <span class="dot"></span>
+    <span id="time-text">平均处理 4 分 47 秒</span>
+  </div>
+</header>
+
+<main>
+
+  <!-- Step 1: Input -->
+  <section id="step-input" class="panel">
+    <h2 class="panel-title">
+      <span class="step-num">1</span>选择商品
+      <span class="panel-sub">支持图片或商品链接</span>
+    </h2>
+    <div class="input-options">
+      <div class="input-card" id="upload-card">
+        <div class="input-icon-mini">
+          <svg viewBox="0 0 24 24"><path d="M12 16V4M12 4l-4 4M12 4l4 4M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </div>
+        <div class="input-label">上传商品图片</div>
+        <div class="input-hint">JPG / PNG,建议白底平铺</div>
+        <input type="file" id="file-input" accept="image/*" hidden>
+      </div>
+      <div class="input-card" id="sku-card">
+        <div class="input-icon-mini">
+          <svg viewBox="0 0 24 24"><path d="M10 14L14 10M9 7h1a4 4 0 014 4v0M14 17h-1a4 4 0 01-4-4v0" stroke-linecap="round"/><path d="M7 9.5a4 4 0 010 5M17 14.5a4 4 0 000-5" stroke-linecap="round"/></svg>
+        </div>
+        <div class="input-label">粘贴商品链接</div>
+        <input type="text" id="sku-input" placeholder="https://item.example.com/...">
+      </div>
+    </div>
+
+    <div class="sample-row">
+      <span class="sample-label">试试样例</span>
+      <button class="sample-btn" data-sample="shoe">运动鞋</button>
+      <button class="sample-btn" data-sample="bag">手提包</button>
+      <button class="sample-btn" data-sample="bottle">保温杯</button>
+      <button class="sample-btn" data-sample="chair">座椅</button>
+      <button class="sample-btn" data-sample="jewelry">珠宝</button>
+    </div>
+
+    <div class="preview-row" id="preview-row" style="display:none">
+      <img id="preview-img" alt="预览">
+      <div class="preview-meta">
+        <div class="preview-name" id="preview-name">运动鞋</div>
+        <div class="preview-est">预计耗时 4-5 分钟</div>
+      </div>
+      <button class="cta-btn" id="start-btn">开始生成</button>
+    </div>
+  </section>
+
+  <!-- Step 2: Pipeline -->
+  <section id="step-pipeline" class="panel" style="display:none">
+    <h2 class="panel-title">
+      <span class="step-num">2</span>处理进度
+      <span class="panel-sub" id="pipeline-status">运行中</span>
+    </h2>
+    <div class="pipeline">
+      <div class="pipe-step" data-step="0">
+        <div class="pipe-circle"><span class="pipe-circle-num">1</span></div>
+        <div class="pipe-name">三维重建</div>
+        <div class="pipe-desc">从单图生成几何与材质</div>
+        <div class="pipe-progress"><div class="pipe-bar"></div></div>
+      </div>
+      <div class="pipe-step" data-step="1">
+        <div class="pipe-circle"><span class="pipe-circle-num">2</span></div>
+        <div class="pipe-name">套图模版</div>
+        <div class="pipe-desc">匹配品牌视觉风格</div>
+        <div class="pipe-progress"><div class="pipe-bar"></div></div>
+      </div>
+      <div class="pipe-step" data-step="2">
+        <div class="pipe-circle"><span class="pipe-circle-num">3</span></div>
+        <div class="pipe-name">多场景渲染</div>
+        <div class="pipe-desc">主图 / 场景 / 细节 / 变体</div>
+        <div class="pipe-progress"><div class="pipe-bar"></div></div>
+      </div>
+      <div class="pipe-step" data-step="3">
+        <div class="pipe-circle"><span class="pipe-circle-num">4</span></div>
+        <div class="pipe-name">平台适配</div>
+        <div class="pipe-desc">尺寸 / 模板 / 文案</div>
+        <div class="pipe-progress"><div class="pipe-bar"></div></div>
+      </div>
+    </div>
+    <div class="pipeline-log" id="pipeline-log"></div>
+  </section>
+
+  <!-- Step 3: Result -->
+  <section id="step-result" class="panel" style="display:none">
+    <h2 class="panel-title">
+      <span class="step-num">3</span>生成结果
+      <span class="panel-sub">点击素材可下载</span>
+    </h2>
+
+    <div class="template-strip">
+      <div class="strip-label">
+        <span>套图模版</span>
+        <span class="strip-hint">切换风格,所有素材即时重出</span>
+      </div>
+      <div class="template-btns">
+        <button class="template-btn active" data-template="minimal">
+          <span class="t-swatch" style="background:#ffffff;border:1px solid #ddd"></span>
+          <span class="t-name">极简</span>
+        </button>
+        <button class="template-btn" data-template="cny">
+          <span class="t-swatch" style="background:linear-gradient(135deg,#f5e9d0,#e8c994)"></span>
+          <span class="t-name">国潮</span>
+        </button>
+        <button class="template-btn" data-template="outdoor">
+          <span class="t-swatch" style="background:linear-gradient(180deg,#9bb0c0,#c2b48a)"></span>
+          <span class="t-name">户外</span>
+        </button>
+        <button class="template-btn" data-template="festival">
+          <span class="t-swatch" style="background:linear-gradient(135deg,#e74c3c,#f39c12)"></span>
+          <span class="t-name">大促</span>
+        </button>
+      </div>
+    </div>
+
+    <div class="result-grid">
+      <!-- 3D Viewer -->
+      <div class="viewer-block">
+        <div class="block-title">
+          <span>3D 模型</span>
+          <span class="block-tag">拖动旋转</span>
+        </div>
+        <div id="three-canvas"></div>
+        <div class="viewer-controls">
+          <span class="label">颜色</span>
+          <button class="color-btn active" data-color="#c0392b" style="background:#c0392b"></button>
+          <button class="color-btn" data-color="#2c5f8d" style="background:#2c5f8d"></button>
+          <button class="color-btn" data-color="#3a7d44" style="background:#3a7d44"></button>
+          <button class="color-btn" data-color="#d4a017" style="background:#d4a017"></button>
+          <button class="color-btn" data-color="#2c2c2c" style="background:#2c2c2c"></button>
+        </div>
+      </div>
+
+      <!-- Generated Assets -->
+      <div class="assets-block">
+        <div class="block-title">
+          <span>平台素材</span>
+          <span class="block-tag" id="asset-count">5 张</span>
+        </div>
+        <div class="asset-tabs">
+          <button class="tab-btn active" data-tab="main">主图<span class="count">5</span></button>
+          <button class="tab-btn" data-tab="scene">场景图<span class="count">3</span></button>
+          <button class="tab-btn" data-tab="detail">细节图<span class="count">2</span></button>
+          <button class="tab-btn" data-tab="variant">变体图<span class="count">2</span></button>
+        </div>
+        <div class="asset-grid" id="asset-grid"></div>
+      </div>
+    </div>
+
+    <!-- Detail Page + Editor -->
+    <div class="detail-section">
+      <div class="detail-preview">
+        <div class="block-title">
+          <span>详情页长图</span>
+          <span class="block-tag" id="detail-dim">400 × 0</span>
+        </div>
+        <div class="phone-frame">
+          <div class="phone-notch"></div>
+          <div class="phone-scroll" id="detail-scroll"></div>
+        </div>
+        <button class="cta-btn secondary detail-dl" id="download-detail">下载详情图</button>
+      </div>
+
+      <div class="detail-editor">
+        <div class="block-title">
+          <span>内容编辑</span>
+          <span class="block-tag">改一个字 · 全套同步</span>
+        </div>
+        <div class="edit-fields">
+          <div class="edit-row">
+            <label class="edit-field flex-1">
+              <span>品牌 (英)</span>
+              <input type="text" class="edit-input" data-edit="brand" value="云桨">
+            </label>
+            <label class="edit-field flex-1">
+              <span>品牌 (中)</span>
+              <input type="text" class="edit-input" data-edit="brandCn" value="云桨" maxlength="4">
+            </label>
+          </div>
+          <label class="edit-field">
+            <span>商品标题</span>
+            <input type="text" class="edit-input" data-edit="title" value="Air Runner Pro">
+          </label>
+          <label class="edit-field">
+            <span>副标题</span>
+            <input type="text" class="edit-input" data-edit="subtitle" value="城市轻跑系列">
+          </label>
+          <div class="edit-row">
+            <label class="edit-field flex-1">
+              <span>售价 ¥</span>
+              <input type="text" class="edit-input" data-edit="price" value="299">
+            </label>
+            <label class="edit-field flex-1">
+              <span>划线价 ¥</span>
+              <input type="text" class="edit-input" data-edit="origPrice" value="599">
+            </label>
+          </div>
+
+          <div class="edit-group">
+            <div class="group-title">核心卖点 (3 条)</div>
+            <div class="slogan-row">
+              <input type="text" class="slogan-title" data-i="0" value="轻量缓震">
+              <input type="text" class="slogan-desc" data-i="0" value="EVA 中底回弹">
+            </div>
+            <div class="slogan-row">
+              <input type="text" class="slogan-title" data-i="1" value="透气网面">
+              <input type="text" class="slogan-desc" data-i="1" value="飞织鞋面通风">
+            </div>
+            <div class="slogan-row">
+              <input type="text" class="slogan-title" data-i="2" value="防滑大底">
+              <input type="text" class="slogan-desc" data-i="2" value="XPU 防滑橡胶">
+            </div>
+          </div>
+
+          <div class="edit-group">
+            <div class="group-title">规格参数 (4 行)</div>
+            <div class="spec-row">
+              <input type="text" class="spec-label" data-i="0" value="尺码">
+              <input type="text" class="spec-value" data-i="0" value="36-46">
+            </div>
+            <div class="spec-row">
+              <input type="text" class="spec-label" data-i="1" value="重量">
+              <input type="text" class="spec-value" data-i="1" value="约 280g (单只)">
+            </div>
+            <div class="spec-row">
+              <input type="text" class="spec-label" data-i="2" value="材质">
+              <input type="text" class="spec-value" data-i="2" value="飞织 + 橡胶大底">
+            </div>
+            <div class="spec-row">
+              <input type="text" class="spec-label" data-i="3" value="适用">
+              <input type="text" class="spec-value" data-i="3" value="日常通勤 / 慢跑">
+            </div>
+          </div>
+
+          <div class="edit-group">
+            <div class="group-title">详情图模块 (可关闭)</div>
+            <div class="section-toggles">
+              <label class="checkbox"><input type="checkbox" class="sec-toggle" data-section="promo" checked> 倒计时</label>
+              <label class="checkbox"><input type="checkbox" class="sec-toggle" data-section="hero" checked> 头图</label>
+              <label class="checkbox"><input type="checkbox" class="sec-toggle" data-section="slogans" checked> 卖点条</label>
+              <label class="checkbox"><input type="checkbox" class="sec-toggle" data-section="scene" checked> 场景图</label>
+              <label class="checkbox"><input type="checkbox" class="sec-toggle" data-section="material" checked> 材质特写</label>
+              <label class="checkbox"><input type="checkbox" class="sec-toggle" data-section="annotation" checked> 细节标注</label>
+              <label class="checkbox"><input type="checkbox" class="sec-toggle" data-section="specs" checked> 规格表</label>
+              <label class="checkbox"><input type="checkbox" class="sec-toggle" data-section="reviews" checked> 用户好评</label>
+              <label class="checkbox"><input type="checkbox" class="sec-toggle" data-section="variants" checked> 配色款式</label>
+              <label class="checkbox"><input type="checkbox" class="sec-toggle" data-section="trust" checked> 服务保障</label>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Publish -->
+    <div class="publish-bar">
+      <div class="publish-info">
+        <div class="publish-title"><span class="check">✓</span>已完成</div>
+        <div class="publish-sub">耗时 <b id="elapsed">04:47</b> · 共 12 张素材</div>
+      </div>
+      <div class="publish-actions">
+        <button class="cta-btn" id="download-all-btn">下载全套 ZIP</button>
+        <button class="platform-btn" data-platform="taobao">同步淘宝</button>
+        <button class="platform-btn" data-platform="jd">同步京东</button>
+        <button class="platform-btn" data-platform="douyin">同步抖音</button>
+        <button class="cta-btn secondary" id="restart-btn">重新生成</button>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<div class="toast" id="toast"></div>
+
+<script src="script.js"></script>
+</body>
+</html>
