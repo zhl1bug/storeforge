@@ -60,31 +60,43 @@
       <span class="sample-label">SKU</span>
       <button class="sample-btn" data-sample="shoe">
         <span class="sku-code">001</span>
-        <span class="sku-name">Air Runner · 运动鞋</span>
+        <span class="sku-name">鞋子</span>
       </button>
       <button class="sample-btn" data-sample="bag">
         <span class="sku-code">002</span>
-        <span class="sku-name">Cloud Tote · 手提包</span>
+        <span class="sku-name">包袋</span>
       </button>
       <button class="sample-btn" data-sample="bottle">
         <span class="sku-code">003</span>
-        <span class="sku-name">Titan Bottle · 保温杯</span>
+        <span class="sku-name">杯具</span>
       </button>
       <button class="sample-btn" data-sample="chair">
         <span class="sku-code">004</span>
-        <span class="sku-name">Ergo Pro · 办公椅</span>
+        <span class="sku-name">座椅</span>
       </button>
       <button class="sample-btn" data-sample="jewelry">
         <span class="sku-code">005</span>
-        <span class="sku-name">Bloom Ring · 钻石戒指</span>
+        <span class="sku-name">珠宝</span>
       </button>
     </div>
 
     <div class="preview-row" id="preview-row" style="display:none">
       <img id="preview-img" alt="预览">
       <div class="preview-meta">
-        <div class="preview-name" id="preview-name">运动鞋</div>
+        <div class="preview-name" id="preview-name">商品预览</div>
         <div class="preview-est">预计 2-3 分钟 · 真实调用 Tripo / Z-Image</div>
+        <div class="preview-type" id="preview-type-wrap" style="display:none">
+          <span class="type-label">快捷文案:</span>
+          <select id="upload-type-select">
+            <option value="generic">自定义商品</option>
+            <option value="shoe">鞋子</option>
+            <option value="bag">包袋</option>
+            <option value="bottle">杯具</option>
+            <option value="chair">座椅</option>
+            <option value="jewelry">珠宝</option>
+          </select>
+          <span class="type-hint">仅影响文字预设,不影响图片生成</span>
+        </div>
       </div>
       <button class="cta-btn" id="start-btn">开始生成</button>
     </div>
@@ -184,14 +196,6 @@
           <span class="block-tag">拖动旋转</span>
         </div>
         <div id="three-canvas"></div>
-        <div class="viewer-controls">
-          <span class="label">颜色</span>
-          <button class="color-btn active" data-color="#c0392b" style="background:#c0392b"></button>
-          <button class="color-btn" data-color="#2c5f8d" style="background:#2c5f8d"></button>
-          <button class="color-btn" data-color="#3a7d44" style="background:#3a7d44"></button>
-          <button class="color-btn" data-color="#d4a017" style="background:#d4a017"></button>
-          <button class="color-btn" data-color="#2c2c2c" style="background:#2c2c2c"></button>
-        </div>
       </div>
 
       <!-- Generated Assets -->
@@ -229,7 +233,12 @@
           <span>内容编辑</span>
           <span class="block-tag">改一个字 · 全套同步</span>
         </div>
-        <div class="edit-fields">
+        <div class="editor-loading" id="editor-loading">
+          <div class="el-spinner"></div>
+          <div class="el-text">等待 3D 模型生成中</div>
+          <div class="el-sub">完成后将根据商品自动填充文案</div>
+        </div>
+        <div class="edit-fields" id="edit-fields">
           <div class="edit-row">
             <label class="edit-field flex-1">
               <span>品牌 (英)</span>

@@ -82,8 +82,8 @@ async function handleApi(req, res, pathname) {
     if (pathname === '/api/3d/generate' && req.method === 'POST') {
       const body = JSON.parse(await readBody(req) || '{}');
       const input = body.image
-        ? { image: body.image }
-        : (body.images && body.images.length ? { images: body.images } : { prompt: body.prompt || '' });
+        ? { image: body.image, prompt: body.prompt || '' }
+        : (body.images && body.images.length ? { images: body.images, prompt: body.prompt || '' } : { prompt: body.prompt || '' });
       const r = await callDashScope({
         url: TRIPO_URL,
         async: true,
@@ -137,6 +137,50 @@ async function handleApi(req, res, pathname) {
     if (pathname === '/api/health') {
       res.writeHead(200);
       res.end(JSON.stringify({ ok: true, hasKey: !!API_KEY }));
+      return;
+    }
+
+    // POST /api/analyze  — 用 VL 模型分析商品图片,自动生成电商文案
+    if (pathname === '/api/analyze' && req.method === 'POST') {
+      const body = JSON.parse(await readBody(req) || '{}');
+      const image = body.image || '';
+      const r = await callDashScope({
+        url: 'https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation',
+        async: false,
+        body: {
+          model: 'qwen-vl-plus',
+          input: {
+            messages: [
+              {
+                role: 'user',
+                content: [
+                  { image },
+                  { text: `你是一位电商运营专家。请分析这张商品图片,以JSON格式返回以下字段:
+{
+  "brand": "建议的品牌英文名(1-2个单词)",
+  "brandCn": "建议的品牌中文名(2个字,如'云舟')",
+  "title": "商品标题(简洁有力,不超过15字)",
+  "subtitle": "副标题(不超过10字,如'轻奢通勤系列')",
+  "price": "建议售价(数字,整数)",
+  "origPrice": "建议划线价(数字,整数,比售价高30-100%)",
+  "slogans": ["卖点1(4字)", "卖点2(4字)", "卖点3(4字)"],
+  "sloganDescs": ["卖点1描述(不超过10字)", "卖点2描述", "卖点3描述"],
+  "specs": [
+    {"label": "规格一", "value": "值"},
+    {"label": "规格二", "value": "值"},
+    {"label": "材质", "value": "主要材质描述"},
+    {"label": "适用", "value": "适用场景"}
+  ]
+}
+只返回JSON,不要其他文字。` },
+                ],
+              },
+            ],
+          },
+        },
+      });
+      res.writeHead(r.status);
+      res.end(JSON.stringify(r.body));
       return;
     }
 

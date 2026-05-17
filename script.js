@@ -45,11 +45,15 @@ const state = {
   realHeroImage: null,    // 详情图 hero 用的 真实图
   realBaseColor: null,    // 生成时使用的 SKU 标准色,变色功能用它做色相基准
   recolorHue: 0,          // 本地变色时的色相偏移 (deg)
+  uploadedImage: null,     // 用户上传的 File 对象
+  uploadedImageBase64: null, // 用户上传图片的 base64 data URL
+  isUploadedImage: false,  // 是否用户上传了图片(而非选择样本)
+  threeRendersReady: false, // 3D 模型渲染是否已完成(为 false 时套图显示 loading)
 };
 
 const SAMPLES = {
   shoe: {
-    name: '运动鞋',
+    name: '鞋子',
     color: '#c0392b',
     edits: {
       title: 'Air Runner Pro',
@@ -67,7 +71,7 @@ const SAMPLES = {
     },
   },
   bag: {
-    name: '手提包',
+    name: '包袋',
     color: '#5b3a8a',
     edits: {
       title: '云朵手提包',
@@ -85,7 +89,7 @@ const SAMPLES = {
     },
   },
   bottle: {
-    name: '保温杯',
+    name: '杯具',
     color: '#2c5f8d',
     edits: {
       title: '钛系保温杯',
@@ -135,6 +139,24 @@ const SAMPLES = {
         { label: '底托', value: '18K 玫瑰金' },
         { label: '工艺', value: '比利时切工 / 镭射编码' },
         { label: '尺码', value: '8 - 23 号 (可调)' },
+      ],
+    },
+  },
+  generic: {
+    name: '自定义商品',
+    color: '#333333',
+    edits: {
+      title: '我的商品',
+      subtitle: '品质之选',
+      price: '199',
+      origPrice: '399',
+      slogans: ['精选材质', '匠心工艺', '品质保证'],
+      sloganDescs: ['严选优质原料', '精湛制作工艺', '严格品控检测'],
+      specs: [
+        { label: '规格', value: '标准款' },
+        { label: '材质', value: '高品质材料' },
+        { label: '重量', value: '以实物为准' },
+        { label: '适用', value: '通用' },
       ],
     },
   },
@@ -263,8 +285,39 @@ $('upload-card').addEventListener('click', () => $('file-input').click());
 $('file-input').addEventListener('change', (e) => {
   if (e.target.files[0]) {
     const file = e.target.files[0];
+    state.uploadedImage = file;
+    state.isUploadedImage = true;
+    // 上传图片时不预设任何商品类别,使用通用类型避免影响生成
+    state.productType = 'generic';
     const url = URL.createObjectURL(file);
-    showPreview(url, file.name, 'shoe');
+    const reader = new FileReader();
+    reader.onload = () => {
+      state.uploadedImageBase64 = reader.result;
+    };
+    reader.readAsDataURL(file);
+    // 使用通用预设文案,不根据类别限制生成内容
+    const gen = SAMPLES.generic;
+    if (gen) {
+      state.color = gen.color;
+      Object.assign(state.edits, JSON.parse(JSON.stringify(gen.edits)));
+      syncEditInputs();
+    }
+    showPreview(url, file.name, 'generic');
+    // 类别选择器作为可选选项,不影响生成逻辑
+    $('preview-type-wrap').style.display = 'flex';
+  }
+});
+
+// 上传图片时的商品类别切换(仅影响文案预设,不影响 3D/图片生成)
+$('upload-type-select')?.addEventListener('change', (e) => {
+  if (state.isUploadedImage) {
+    state._displayType = e.target.value;
+    const sample = SAMPLES[e.target.value];
+    if (sample) {
+      state.color = sample.color;
+      Object.assign(state.edits, JSON.parse(JSON.stringify(sample.edits)));
+      syncEditInputs();
+    }
   }
 });
 
@@ -273,31 +326,16 @@ $('sku-card').addEventListener('click', (e) => {
 });
 $('sku-input').addEventListener('keypress', (e) => {
   if (e.key === 'Enter' && e.target.value) {
+    state.isUploadedImage = false;
+    state.uploadedImage = null;
+    state.uploadedImageBase64 = null;
+    $('preview-type-wrap').style.display = 'none';
     showPreview(samplePreviewSVG('bag'), e.target.value.slice(0, 40) + (e.target.value.length > 40 ? '...' : ''), 'bag');
   }
 });
 
 $('start-btn').addEventListener('click', runPipeline);
 $('restart-btn').addEventListener('click', () => location.reload());
-
-document.querySelectorAll('.color-btn').forEach(btn => {
-  btn.addEventListener('click', () => {
-    document.querySelectorAll('.color-btn').forEach(b => b.classList.remove('active'));
-    btn.classList.add('active');
-    state.color = btn.dataset.color;
-    // 真实生成完成后 — 本地变色,不重新调 API
-    const hasRealAssets = Object.keys(state.realAssets).length > 0;
-    if (state.mode === 'real' && hasRealAssets) {
-      applyLocalRecolor(state.color);
-      toast('本地变色完成 · 未调用 API');
-    } else {
-      // 演示模式 / 还未生成 — 走原有的程序化变色
-      if (state.productMesh) applyColor(state.productMesh, state.color);
-      renderAssetGrid(currentTab);
-      renderDetailImage();
-    }
-  });
-});
 
 let currentTab = 'main';
 document.querySelectorAll('.tab-btn').forEach(btn => {
@@ -420,14 +458,17 @@ function samplePreviewSVG(type) {
 }
 
 function selectSample(type) {
+  // 清除用户上传的图片状态,切回样本模式
+  state.isUploadedImage = false;
+  state.uploadedImage = null;
+  state.uploadedImageBase64 = null;
+  $('preview-type-wrap').style.display = 'none';
+  state.threeRendersReady = true; // 样本模式直接显示编辑区
+  updateEditorState();
   state.productType = type;
   const sample = SAMPLES[type];
   state.color = sample.color;
   document.querySelectorAll('.sample-btn').forEach(b => b.classList.toggle('active', b.dataset.sample === type));
-  // Reset the color row active state to match
-  document.querySelectorAll('.color-btn').forEach((b, i) => {
-    b.classList.toggle('active', i === 0);
-  });
   // Apply sample-specific edits (title, slogans, specs, price)
   if (sample.edits) {
     Object.assign(state.edits, JSON.parse(JSON.stringify(sample.edits)));
@@ -470,7 +511,7 @@ function showPreview(src, name, type) {
 // ============ Pipeline ============
 const LOGS = [
   { delay: 100,  msg: '读取输入图像', type: 'info' },
-  { delay: 350,  msg: '识别商品类别:运动鞋', type: 'info' },
+  { delay: 350,  msg: '识别商品类型', type: 'info' },
   { delay: 650,  msg: '生成三维网格 (14,832 面)', type: 'ok' },
   { delay: 950,  msg: 'UV 展开与材质烘焙', type: 'info' },
   { delay: 1250, msg: '基础模型就绪', type: 'ok' },
@@ -504,6 +545,8 @@ async function runPipeline() {
   state.realAssets = {};
   state.realHeroImage = null;
   state.realBaseColor = null;
+  state.threeRendersReady = false; // 3D 完成前套图区域显示 loading
+  updateEditorState();
 
   if (state.mode === 'real') {
     await runRealPipeline();
@@ -538,8 +581,10 @@ async function runRealPipeline() {
   const steps = document.querySelectorAll('.pipe-step');
   // 生成时锁定 SKU 标准色作为变色功能的基准
   state.realBaseColor = SAMPLES[state.productType]?.color || state.color;
-  const productPrompt = makeProductPrompt(state.productType, state.color, state.edits);
-  const imagePrompts = makeAssetPrompts(state.productType, state.color, state.edits);
+  // 上传图片时使用通用类型生成提示词,避免被预设类别带偏
+  const genType = state.isUploadedImage ? 'generic' : state.productType;
+  const productPrompt = makeProductPrompt(genType, state.color, state.edits);
+  const imagePrompts = makeAssetPrompts(genType, state.color, state.edits);
 
   // ---- 状态条: 显示 + 初始化所有缩略图占位 ----
   $('pipeline-statusbar').style.display = 'flex';
@@ -557,6 +602,25 @@ async function runRealPipeline() {
     if (!tripoTaskId) throw new Error('Tripo 任务启动失败');
     addLog(`Tripo task_id: ${tripoTaskId.slice(0, 12)}...`, 'ok');
     setStepProgress(0, 100);
+
+    // ===== AI 分析: 自动生成商品文案 (后台不阻塞) =====
+    if (state.isUploadedImage && state.uploadedImageBase64) {
+      analyzeProductImage(state.uploadedImageBase64).then(ai => {
+        if (!ai || !ai.title) return;
+        addLog(`AI 生成文案: ${ai.title}`, 'ok');
+        if (ai.brand) state.edits.brand = ai.brand;
+        if (ai.brandCn) state.edits.brandCn = ai.brandCn;
+        if (ai.title) state.edits.title = ai.title;
+        if (ai.subtitle) state.edits.subtitle = ai.subtitle;
+        if (ai.price) state.edits.price = String(ai.price);
+        if (ai.origPrice) state.edits.origPrice = String(ai.origPrice);
+        if (Array.isArray(ai.slogans)) ai.slogans.forEach((s,i)=>{if(i<3)state.edits.slogans[i]=s});
+        if (Array.isArray(ai.sloganDescs)) ai.sloganDescs.forEach((s,i)=>{if(i<3)state.edits.sloganDescs[i]=s});
+        if (Array.isArray(ai.specs)) ai.specs.forEach((s,i)=>{if(i<4&&state.edits.specs[i]){if(s.label)state.edits.specs[i].label=s.label;if(s.value)state.edits.specs[i].value=s.value}});
+        syncEditInputs();
+        try { if ($('step-result').style.display !== 'none') renderDetailImage(); } catch {}
+      }).catch(err => { console.warn('AI 文案生成失败:', err); });
+    }
 
     // ===== Step 2: 并发提交全部 Z-Image 任务 =====
     setStep(1, true);
@@ -643,6 +707,10 @@ async function runRealPipeline() {
           state.scene.add(fallback);
           state.productMesh = fallback;
         }
+        // Tripo 失败时放行,让 Z-Image 结果(或程序化 SVG)显示出来
+        state.threeRendersReady = true;
+        updateEditorState();
+        try { renderAssetGrid(currentTab); renderDetailImage(); } catch {}
       }
       tripoDone = true;
       finalize();
@@ -654,6 +722,10 @@ async function runRealPipeline() {
         state.scene.add(fallback);
         state.productMesh = fallback;
       }
+      // Tripo 失败时放行,让 Z-Image 结果(或程序化 SVG)显示出来
+      state.threeRendersReady = true;
+      updateEditorState();
+      try { renderAssetGrid(currentTab); renderDetailImage(); } catch {}
       tripoDone = true;
       finalize();
     });
@@ -864,13 +936,15 @@ function makeProductPrompt(type, color, edits) {
   };
   const c = colorWords[baseColor] || 'colored';
   const title = edits.title || '';
+  // 用户上传图片时,Tripo 走图生 3D,prompt 仅做辅助说明
+  const refPrefix = state.uploadedImageBase64 ? '根据参考图生成: ' : '';
   const base = {
-    shoe:    `a modern ${c} running sneaker, sleek design, sport shoe, 3d model, isolated on white`,
-    bag:     `an elegant ${c} leather handbag, classic luxury design, 3d model`,
-    bottle:  `a sleek ${c} insulated water bottle, cylindrical, modern design, 3d model`,
-    chair:   `a black ergonomic office chair with five-star base, modern design, 3d model`,
-    jewelry: `a classic diamond engagement ring with rose gold band, prong setting, 3d model`,
-  }[type] || `a ${c} product, 3d model`;
+    shoe:    `${refPrefix}a ${c} shoe, footwear product, 3d model, isolated on white`,
+    bag:     `${refPrefix}a ${c} bag, handbag or backpack, 3d model`,
+    bottle:  `${refPrefix}a ${c} bottle, drinking container, modern design, 3d model`,
+    chair:   `${refPrefix}a ${c} chair, seating furniture, 3d model`,
+    jewelry: `${refPrefix}a ${c} jewelry item, accessory, 3d model`,
+  }[type] || `${refPrefix}a ${c} product, 3d model`;
   return { short: base.slice(0, 60), full: base + ', ' + (title ? title + ', ' : '') + 'product photography, high quality' };
 }
 
@@ -882,7 +956,7 @@ function makeAssetPrompts(type, color, edits) {
   };
   const c = colorWords[baseColor] || '彩色';
   const productCn = {
-    shoe: '运动跑鞋', bag: '手提包', bottle: '保温水杯', chair: '人体工学办公椅', jewelry: '钻石戒指',
+    shoe: '鞋子', bag: '包袋', bottle: '杯具', chair: '座椅', jewelry: '珠宝',
   }[type] || '商品';
   const baseStyle = '电商商品摄影, 简洁干净, 高质量, 8K, 锐利清晰, 无水印';
   const whiteBg = '纯白背景, 摄影棚灯光';
@@ -906,10 +980,21 @@ function makeAssetPrompts(type, color, edits) {
 
 // ---- API callers (via /api proxy) ----
 async function startTripoTask(prompt) {
+  const body = { texture_quality: 'standard' };
+
+  // 如果用户上传了图片,传给 Tripo 做图生 3D(同时保留文本提示做辅助)
+  if (state.uploadedImageBase64) {
+    body.image = state.uploadedImageBase64;
+    body.prompt = prompt;
+    addLog('使用用户上传图片进行 3D 重建', 'info');
+  } else {
+    body.prompt = prompt;
+  }
+
   const r = await fetch('/api/3d/generate', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ prompt, texture_quality: 'standard' }),
+    body: JSON.stringify(body),
   });
   const data = await r.json();
   if (!r.ok || data.code) {
@@ -932,6 +1017,59 @@ async function callImageGen(prompt, size = '1024*1024') {
   const content = data.output?.choices?.[0]?.message?.content || [];
   const imgItem = content.find(c => c.image);
   return imgItem?.image || null;
+}
+
+// ---- 商品图片 AI 分析:自动生成品牌、标题、卖点等文案 ----
+async function analyzeProductImage(base64Image) {
+  if (!base64Image) return null;
+  const prompt = '你是一位电商运营专家。请分析这张商品图片,以JSON格式返回以下字段:\n'
+    + '{\n'
+    + '  "brand": "建议的品牌英文名(1-2个单词)",\n'
+    + '  "brandCn": "建议的品牌中文名(2个字,如\'云舟\')",\n'
+    + '  "title": "商品标题(简洁有力,不超过15字)",\n'
+    + '  "subtitle": "副标题(不超过10字,如\'轻奢通勤系列\')",\n'
+    + '  "price": "建议售价(数字,整数)",\n'
+    + '  "origPrice": "建议划线价(数字,整数,比售价高30-100%)",\n'
+    + '  "slogans": ["卖点1(4字)", "卖点2(4字)", "卖点3(4字)"],\n'
+    + '  "sloganDescs": ["卖点1描述(不超过10字)", "卖点2描述", "卖点3描述"],\n'
+    + '  "specs": [\n'
+    + '    {"label": "规格一", "value": "值"},\n'
+    + '    {"label": "规格二", "value": "值"},\n'
+    + '    {"label": "材质", "value": "主要材质描述"},\n'
+    + '    {"label": "适用", "value": "适用场景"}\n'
+    + '  ]\n'
+    + '}\n'
+    + '只返回JSON,不要其他文字。';
+  try {
+    const r = await fetch('/api/analyze', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ image: base64Image }),
+    });
+    const data = await r.json();
+    addLog('商品 AI 分析完成,正在生成文案...', 'info');
+    const content = data.output?.choices?.[0]?.message?.content || '';
+    // 尝试解析 JSON:优先找 ```json ... ``` 块,否则全文提取
+    let json = null;
+    const jsonMatch = content.match(/```(?:json)?\s*([\s\S]*?)```/);
+    const raw = jsonMatch ? jsonMatch[1].trim() : content.trim();
+    // 找第一个 { 和最后一个 } 之间的内容
+    const braceStart = raw.indexOf('{');
+    const braceEnd = raw.lastIndexOf('}');
+    if (braceStart !== -1 && braceEnd > braceStart) {
+      try { json = JSON.parse(raw.slice(braceStart, braceEnd + 1)); } catch {}
+    }
+    if (!json) {
+      addLog('× 商品 AI 分析解析失败,继续使用默认文案', 'warn');
+      return null;
+    }
+    if (!json.title) return null;
+    return json;
+  } catch (err) {
+    addLog(`× 商品 AI 分析失败: ${err.message}`, 'warn');
+    console.warn('商品分析失败:', err);
+    return null;
+  }
 }
 
 async function pollTaskUntilDone(taskId, label = 'task', onProgress, intervalMs = 5000, maxMs = 8 * 60 * 1000) {
@@ -982,6 +1120,7 @@ function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 function showResult() {
   $('step-result').style.display = 'block';
   $('step-result').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  updateEditorState();
 
   // 在真实模式下显示真实耗时;否则显示假数据
   if (state.mode === 'real' && state.startTime) {
@@ -1019,7 +1158,7 @@ function initThreeJS() {
   const camera = new THREE.PerspectiveCamera(45, w / h, 0.1, 100);
   camera.position.set(3.5, 2.5, 4.5);
 
-  const renderer = new THREE.WebGLRenderer({ antialias: true });
+  const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
   renderer.setSize(w, h);
   renderer.setPixelRatio(window.devicePixelRatio);
   renderer.shadowMap.enabled = true;
@@ -1123,6 +1262,16 @@ function loadGLBIntoScene(url) {
       state.productMesh = model;
       hideThreeLoading();
       toast('3D 模型加载完成');
+
+      // GLB 加载完成 → 从三维模型渲染套图(覆盖 Z-Image 结果,保证跟商品一致)
+      setTimeout(() => {
+        captureAllThreeAssets();
+        // 刷新资产网格和详情图
+        try {
+          renderAssetGrid(currentTab);
+          renderDetailImage();
+        } catch (e) { console.warn('re-render after capture', e); }
+      }, 300);
     },
     undefined,
     (err) => {
@@ -1144,20 +1293,10 @@ function showThreeLoading() {
       <div class="tl-spinner"></div>
       <div class="tl-text">Tripo 3D 模型生成中</div>
       <div class="tl-sub">通常 1-3 分钟 · 完成后自动加载</div>
-      <div class="tl-progress"><div class="tl-bar"></div></div>
     `;
     container.appendChild(overlay);
   }
   overlay.style.display = 'flex';
-  // 同步进度条 — 基于 Tripo 已运行时间预估 (假定平均 150s)
-  if (!state._tlInterval) {
-    state._tlInterval = setInterval(() => {
-      const el = container.querySelector('.tl-bar');
-      const elapsed = state.startTime ? (Date.now() - state.startTime) / 1000 : 0;
-      const pct = Math.min(95, (elapsed / 150) * 100);
-      if (el) el.style.width = pct + '%';
-    }, 500);
-  }
 }
 
 function hideThreeLoading() {
@@ -1165,10 +1304,132 @@ function hideThreeLoading() {
   if (!container) return;
   const overlay = container.querySelector('.three-loading');
   if (overlay) overlay.remove();
-  if (state._tlInterval) {
-    clearInterval(state._tlInterval);
-    state._tlInterval = null;
+}
+
+// 切换内容编辑区的 loading / 可编辑状态
+function updateEditorState() {
+  const loading = $('editor-loading');
+  const fields = $('edit-fields');
+  if (!loading || !fields) return;
+  const showLoading = state.isUploadedImage && !state.threeRendersReady;
+  loading.style.display = showLoading ? 'flex' : 'none';
+  fields.style.display = showLoading ? 'none' : 'flex';
+}
+
+// ============ Three.js → 商品套图截图 ============
+// 用三维模型渲染代替 Z-Image 生成商品图,确保图片跟上传的商品一致
+const THREE_CAPTURE_ANGLES = {
+  'main-0':  { pos: [0, 1.0, 4.0],   label: '正面' },
+  'main-1':  { pos: [3.0, 1.5, 3.0], label: '45°' },
+  'main-2':  { pos: [4.0, 0.5, 0],   label: '侧面' },
+  'main-3':  { pos: [0, 4.5, 0.01],  label: '俯视' },
+  'main-4':  { pos: [-3.5, 1.0, 0],  label: '背面' },
+  'scene-0': { pos: [2.5, 2.0, 3.5], label: '场景' },
+  'scene-1': { pos: [-2.0, 1.5, 3.5],label: '场景' },
+  'scene-2': { pos: [0, 2.5, 4.5],   label: '场景' },
+  'detail-0':{ pos: [0.8, 0.5, 2.0], label: '材质' },
+  'detail-1':{ pos: [-0.5, 1.2, 1.8],label: 'Logo' },
+  'variant-0':{ pos: [3.0, 1.5, 3.0],label: '变体' },
+  'variant-1':{ pos: [3.0, 1.5, 3.0],label: '变体' },
+  'hero':    { pos: [0, 1.5, 4.5],   label: 'Hero' },
+};
+
+function captureThreeAsset(slot, width = 1024, height = 1024) {
+  if (!state.camera || !state.renderer || !state.scene) return null;
+  const angle = THREE_CAPTURE_ANGLES[slot];
+  if (!angle) return null;
+
+  try {
+    // 记住原始视角
+    const origPos = state.camera.position.clone();
+    const origTarget = state.controls.target.clone();
+
+    // 定位相机
+    state.camera.position.set(angle.pos[0], angle.pos[1], angle.pos[2]);
+    state.camera.lookAt(0, 0, 0);
+    state.controls.target.set(0, 0, 0);
+    state.controls.update();
+
+    // 渲染 & 截图
+    state.renderer.render(state.scene, state.camera);
+    const dataUrl = state.renderer.domElement.toDataURL('image/png');
+
+    // 恢复原始视角
+    state.camera.position.copy(origPos);
+    state.controls.target.copy(origTarget);
+    state.controls.update();
+
+    return dataUrl;
+  } catch (err) {
+    console.warn('captureThreeAsset error:', slot, err);
+    return null;
   }
+}
+
+function captureAllThreeAssets() {
+  if (!state.camera || !state.renderer || !state.scene) return {};
+  const results = {};
+  let count = 0;
+
+  // 创建离屏渲染器,高分辨率捕获
+  let capRenderer;
+  try {
+    capRenderer = new THREE.WebGLRenderer({
+      antialias: true, preserveDrawingBuffer: true, alpha: true,
+    });
+    capRenderer.setSize(1024, 1024);
+    capRenderer.setPixelRatio(1);
+    capRenderer.shadowMap.enabled = true;
+    capRenderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  } catch (e) {
+    console.warn('offline renderer failed, fallback to main', e);
+    capRenderer = null;
+  }
+
+  const renderer = capRenderer || state.renderer;
+  const rWidth = capRenderer ? 1024 : state.renderer.domElement.width;
+  const rHeight = capRenderer ? 1024 : state.renderer.domElement.height;
+
+  // 记住原始视角
+  const origPos = state.camera.position.clone();
+  const origTarget = state.controls.target.clone();
+
+  for (const slot of Object.keys(THREE_CAPTURE_ANGLES)) {
+    const angle = THREE_CAPTURE_ANGLES[slot];
+    try {
+      state.camera.position.set(angle.pos[0], angle.pos[1], angle.pos[2]);
+      state.camera.aspect = rWidth / rHeight;
+      state.camera.updateProjectionMatrix();
+      state.camera.lookAt(0, 0, 0);
+      state.controls.target.set(0, 0, 0);
+      state.controls.update();
+
+      renderer.render(state.scene, state.camera);
+      results[slot] = renderer.domElement.toDataURL('image/png');
+      count++;
+    } catch (e) {
+      console.warn('capture failed:', slot, e);
+    }
+  }
+
+  // 恢复原始视角
+  state.camera.position.copy(origPos);
+  state.camera.aspect = state.renderer.domElement.width / state.renderer.domElement.height;
+  state.camera.updateProjectionMatrix();
+  state.controls.target.copy(origTarget);
+  state.controls.update();
+  state.renderer.render(state.scene, state.camera);
+
+  if (capRenderer) capRenderer.dispose();
+
+  if (count > 0) {
+    state.realAssets = { ...state.realAssets, ...results };
+    if (results['hero']) state.realHeroImage = results['hero'];
+    addLog(`3D 模型渲染完成: ${count} 张套图`, 'ok');
+  }
+  state.threeRendersReady = true; // 标记 3D 渲染完成,套图可以显示了
+  updateEditorState();
+  return results;
 }
 
 function buildProductMesh(type, color) {
@@ -1543,8 +1804,9 @@ function makeAssetSVG(item, type, category, idx) {
   const fill = isGradient ? `url(#${gradId})` : rawBg;
 
   // Use real image if available for this slot
+  // 上传图片后,3D 渲染完成前不显示 Z-Image 结果,显示 loading
   const realKey = `${category}-${idx}`;
-  const realUrl = state.realAssets[realKey];
+  const realUrl = realAssetOrNull(state.realAssets[realKey]);
 
   let productSVG;
   if (realUrl) {
@@ -1580,9 +1842,15 @@ function escAttr(s) {
   return String(s).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
 }
 
+// 3D 模型没完成时套图显示 loading,完成后才展示真实截图
+function realAssetOrNull(url) {
+  return (state.isUploadedImage && !state.threeRendersReady) ? null : (url || null);
+}
+
 function proxyImageUrl(url) {
   // 在真实模式下,把 OSS 图片走代理,避免 canvas 导出时的 CORS 污染
   if (location.protocol === 'file:') return url; // 直接打开 HTML 时没法走代理
+  if (url && (url.startsWith('data:') || url.startsWith('blob:'))) return url; // data URL / blob 不走代理
   return '/api/proxy?url=' + encodeURIComponent(url);
 }
 
@@ -1668,7 +1936,7 @@ function renderDetailImage() {
       <text y="11" text-anchor="middle" font-size="8" fill="#fff" opacity="0.9">新 品</text>
     </g>`);
     // Product
-    if (state.realHeroImage) {
+    if (realAssetOrNull(state.realHeroImage)) {
       const heroUrl = escAttr(proxyImageUrl(state.realHeroImage));
       parts.push(`<image href="${heroUrl}" x="${W/2 - 140}" y="${y + 120}" width="280" height="280" preserveAspectRatio="xMidYMid meet" crossorigin="anonymous"/>`);
     } else if (state.mode === 'real') {
@@ -1757,7 +2025,7 @@ function renderDetailImage() {
     const h = 320;
     parts.push(`<rect x="0" y="${y}" width="${W}" height="${h}" fill="#ffffff"/>`);
     // 在材质段用真实的"细节-材质"图(状态条标的 detail-0)
-    const matUrl = state.realAssets['detail-0'];
+    const matUrl = realAssetOrNull(state.realAssets['detail-0']);
     if (matUrl) {
       parts.push(`<image href="${escAttr(proxyImageUrl(matUrl))}" x="20" y="${y+30}" width="160" height="260" preserveAspectRatio="xMidYMid slice" crossorigin="anonymous"/>`);
       parts.push(`<rect x="20" y="${y+30}" width="160" height="260" fill="none" stroke="#e8e8e8" stroke-width="1"/>`);
@@ -1795,7 +2063,7 @@ function renderDetailImage() {
     parts.push(`<text x="${W/2}" y="${y+42}" text-anchor="middle" font-size="13" font-weight="700" letter-spacing="6" fill="#333">- 细 节 解 析 -</text>`);
     parts.push(`<text x="${W/2}" y="${y+60}" text-anchor="middle" font-size="9" letter-spacing="4" fill="#888">DETAIL VIEW</text>`);
     // 主图 45° 真实图(没就绪时 loading;mock 时程序化)
-    const annUrl = state.realAssets['main-1'];
+    const annUrl = realAssetOrNull(state.realAssets['main-1']);
     const annCx = W/2, annCy = y + 230;
     if (annUrl) {
       parts.push(`<image href="${escAttr(proxyImageUrl(annUrl))}" x="${annCx - 120}" y="${annCy - 100}" width="240" height="200" preserveAspectRatio="xMidYMid meet" crossorigin="anonymous"/>`);
@@ -2002,7 +2270,7 @@ function esc(s) {
 
 // 详情图小工具:优先用真实图,真实模式没就绪时显示 loading,否则程序化
 function detailImageOrLoading(slot, x, y, w, h, productArgs) {
-  const url = state.realAssets[slot];
+  const url = realAssetOrNull(state.realAssets[slot]);
   if (url) {
     return `<image href="${escAttr(proxyImageUrl(url))}" x="${x}" y="${y}" width="${w}" height="${h}" preserveAspectRatio="xMidYMid meet" crossorigin="anonymous"/>`;
   }
