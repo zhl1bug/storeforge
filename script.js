@@ -38,7 +38,7 @@ const state = {
     reviews: true,
     trust: true,
   },
-  mode: 'real',           // 'mock' | 'real'  — 真实模式调 Tripo / Z-Image
+  mode: 'real',           // 'mock' | 'real'  — 真实模式调 Tripo / 万相2.7
   market: 'cn',           // 'cn' | 'us' | 'sea' | 'eu' | 'ru'
   realModelUrl: null,     // Tripo 返回的 GLB URL
   realAssets: {},         // 'category-idx' => image URL
@@ -127,9 +127,9 @@ async function saveToHistory() {
 function restoreHistory(record) {
   if (!record) return;
   // 恢复状态
-  state.productType = record.productType || 'generic';
+  state.productType = record.productType || "generic";
   state.color = record.color || '#333333';
-  state.template = record.template || 'minimal';
+  state.template = record.template || "minimal";
   state.edits = JSON.parse(JSON.stringify(record.edits));
   state.detailSections = { ...record.detailSections };
   // 优先使用本地保存的路径（不会过期），fallback 到远程 URL
@@ -143,8 +143,10 @@ function restoreHistory(record) {
   state.realHeroImage = record.localAssets?.hero || record.realHeroImage || null;
   state.isUploadedImage = record.isUploadedImage || false;
   state.uploadedImageBase64 = record.uploadedImageBase64 || null;
-  state.market = record.market || 'cn';
-  state.threeRendersReady = false; // 恢复时默认显示 loading，不直接显示可能失效的旧图
+  state.market = record.market || "cn";
+  // 有本地保存的图片时直接显示，否则显示 loading
+  const hasLocalAssets = record.localAssets && Object.keys(record.localAssets).length > 0;
+  state.threeRendersReady = hasLocalAssets;
   state.uploadedImage = null;
 
   // 同步 UI
@@ -162,13 +164,13 @@ function restoreHistory(record) {
   }
 
   // 隐藏输入和进度，直接显示结果
-  $('step-input').style.opacity = '1';
-  $('step-input').style.pointerEvents = 'auto';
-  $('step-pipeline').style.display = 'none';
-  $('step-result').style.display = 'block';
-  $('step-result').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  $("step-input").style.opacity = "1";
+  $("step-input").style.pointerEvents = "auto";
+  $("step-pipeline").style.display = "none";
+  $("step-result").style.display = "block";
+  $("step-result").scrollIntoView({ behavior: "smooth", block: "start" });
 
-  // 重新初始化 3D，恢复时默认显示 loading，不直接加载可能失效的旧模型
+  // 重新初始化 3D
   if (state.scene) {
     state.renderer?.dispose();
     state.scene = null;
@@ -176,19 +178,19 @@ function restoreHistory(record) {
     state.renderer = null;
     state.controls = null;
     state.productMesh = null;
-    $('three-canvas').innerHTML = '';
+    $("three-canvas").innerHTML = "";
   }
-  // 暂时清空 realModelUrl，避免 initThreeJS 自动加载可能已失效的 GLB
-  const savedModelUrl = state.realModelUrl;
-  state.realModelUrl = null;
   initThreeJS();
-  // 恢复 URL 供后续使用（如重新生成时）
-  state.realModelUrl = savedModelUrl;
+  // 有本地模型时直接加载，否则显示程序化模型占位
+  if (record.localModelUrl) {
+    loadGLBIntoScene(record.localModelUrl);
+  }
 
-  renderAssetGrid(currentTab || 'main');
+  renderAssetGrid(currentTab || "main");
   renderDetailImage();
   updateEditorState();
 }
+
 
 async function deleteHistory(id) {
   // 先删除服务端本地文件
@@ -652,7 +654,7 @@ $('sku-input').addEventListener('keypress', (e) => {
 });
 
 $('start-btn').addEventListener('click', runPipeline);
-$('restart-btn').addEventListener('click', () => location.reload());
+$('restart-btn').addEventListener('click', resetAll);
 
 let currentTab = 'main';
 document.querySelectorAll('.tab-btn').forEach(btn => {
@@ -731,10 +733,10 @@ document.querySelectorAll('.mode-btn').forEach(btn => {
     btn.classList.add('active');
     state.mode = btn.dataset.mode;
     if (state.mode === 'real') {
-      toast('真实生成 · Tripo 3D + Z-Image 文生图');
-      $('time-text').textContent = 'Tripo + Z-Image · 预计 2-3 分钟';
+      toast('真实生成 · Tripo 3D + 万相2.7 文生图');
+      $('time-text').textContent = 'Tripo + 万相2.7 · 预计 2-3 分钟';
       const est = document.querySelector('.preview-est');
-      if (est) est.textContent = '预计 2-3 分钟 · 真实调用 Tripo / Z-Image';
+      if (est) est.textContent = '预计 2-3 分钟 · 真实调用 Tripo / 万相2.7';
     } else {
       toast('演示模式 · 瞬时生成');
       $('time-text').textContent = '演示模式 · 流程演示无 API 调用';
@@ -881,6 +883,52 @@ const LOGS = [
   { delay: 3200, msg: '全部素材生成完毕,可直接上架', type: 'ok' },
 ];
 
+function resetAll() {
+  // 清空上传状态
+  state.uploadedImage = null;
+  state.uploadedImageBase64 = null;
+  state.isUploadedImage = false;
+  state.productType = 'shoe';
+
+  // 清空生成结果
+  state.realAssets = {};
+  state.realModelUrl = null;
+  state.realHeroImage = null;
+  state.threeRendersReady = false;
+
+  // 清空 3D 场景
+  if (state.scene) {
+    state.renderer?.dispose();
+    state.scene = null;
+    state.camera = null;
+    state.renderer = null;
+    state.controls = null;
+    state.productMesh = null;
+    $('three-canvas').innerHTML = '';
+  }
+
+  // 隐藏结果区域
+  $('step-result').style.display = 'none';
+  $('step-pipeline').style.display = 'none';
+
+  // 恢复 Step 1 可交互状态
+  $('step-input').style.opacity = '1';
+  $('step-input').style.pointerEvents = 'auto';
+
+  // 清空预览
+  $('preview-row').style.display = 'none';
+  $('preview-img').src = '';
+  $('file-input').value = '';
+
+  // 清空日志
+  $('pipeline-log').innerHTML = '';
+
+  // 重置为默认样本
+  selectSample('shoe');
+
+  toast('已重置,请上传新图片');
+}
+
 async function runPipeline() {
   state.startTime = Date.now();
   $('step-pipeline').style.display = 'block';
@@ -946,7 +994,7 @@ async function runMockPipeline() {
   await sleep(400);
 }
 
-// ---- Real pipeline: call Tripo + Z-Image via /api proxy ----
+// ---- Real pipeline: call Tripo + 万相2.7 via /api proxy ----
 async function runRealPipeline() {
   const steps = document.querySelectorAll('.pipe-step');
   // 生成时锁定 SKU 标准色作为变色功能的基准
@@ -978,6 +1026,7 @@ async function runRealPipeline() {
 
     // ===== AI 分析: 自动生成商品文案 (后台不阻塞) =====
     if (state.isUploadedImage && state.uploadedImageBase64) {
+      addLog('AI 分析商品图片,自动生成文案...', 'info');
       analyzeProductImage(state.uploadedImageBase64).then(ai => {
         if (!ai || !ai.title) return;
         addLog(`AI 生成文案: ${ai.title}`, 'ok');
@@ -995,9 +1044,9 @@ async function runRealPipeline() {
       }).catch(() => {});
     }
 
-    // ===== Step 2: 并发提交全部 Z-Image 任务 =====
+    // ===== Step 2: 并发提交全部 万相2.7 任务 =====
     setStep(1, true);
-    addLog(`并发提交 ${imagePrompts.length} 个 Z-Image 任务 (主图 / 场景 / 细节 / Hero)`, 'info');
+    addLog(`并发提交 ${imagePrompts.length} 个 万相2.7 任务 (主图 / 场景 / 细节 / Hero)`, 'info');
     let completed = 0;
     const totalGens = imagePrompts.length;
 
@@ -1010,7 +1059,7 @@ async function runRealPipeline() {
     // 并发跑所有图片生成 (限流 4,失败自动重试 2 次)
     const gate = gateLimit(4);
     const imagePromises = imagePrompts.map((p) => {
-      return gate(() => callImageGenWithRetry(p.prompt, '1024*1024'))
+      return gate(() => callImageGenWithRetry(p.prompt, '1280*1280'))
         .then(url => {
           const elapsed = ((Date.now() - startTime) / 1000).toFixed(0);
           state.realAssets[p.slot] = url;
@@ -1079,7 +1128,7 @@ async function runRealPipeline() {
           state.scene.add(fallback);
           state.productMesh = fallback;
         }
-        // Tripo 失败时放行,让 Z-Image 结果(或程序化 SVG)显示出来
+        // Tripo 失败时放行,让 万相2.7 结果(或程序化 SVG)显示出来
         state.threeRendersReady = true;
         updateEditorState();
         try { renderAssetGrid(currentTab); renderDetailImage(); } catch {}
@@ -1094,7 +1143,7 @@ async function runRealPipeline() {
         state.scene.add(fallback);
         state.productMesh = fallback;
       }
-      // Tripo 失败时放行,让 Z-Image 结果(或程序化 SVG)显示出来
+      // Tripo 失败时放行,让 万相2.7 结果(或程序化 SVG)显示出来
       state.threeRendersReady = true;
       updateEditorState();
       try { renderAssetGrid(currentTab); renderDetailImage(); } catch {}
@@ -1104,7 +1153,7 @@ async function runRealPipeline() {
 
     // 等所有图片完成 (含重试 / 失败) 后再标"全部完成"
     Promise.allSettled(imagePromises).then(async () => {
-      addLog(`Z-Image 全部任务结束 (${completed}/${totalGens})`, completed === totalGens ? 'ok' : 'warn');
+      addLog(`全部图片任务结束 (${completed}/${totalGens})`, completed === totalGens ? 'ok' : 'warn');
       imagesDone = true;
       await finalize();
       // 最后再刷一次,确保所有就绪的图都进入卡片
@@ -1174,7 +1223,7 @@ function gateLimit(concurrency = 4) {
   };
 }
 
-// 带重试的 Z-Image 调用
+// 带重试的图片调用
 async function callImageGenWithRetry(prompt, size, retries = 2, retryDelay = 2500) {
   let lastErr;
   for (let attempt = 0; attempt <= retries; attempt++) {
@@ -1297,21 +1346,26 @@ function makeAssetPrompts(type, color, edits) {
     const productCn = {
       shoe: '鞋子', bag: '包袋', bottle: '杯具', chair: '座椅', jewelry: '珠宝',
     }[type] || '商品';
-    const baseStyle = '电商商品摄影, 简洁干净, 高质量, 8K, 锐利清晰, 无水印';
-    const whiteBg = '纯白背景, 摄影棚灯光';
+    const mainStyle = '电商商品摄影, 简洁干净, 高质量, 8K, 锐利清晰, 无水印';
+    const sceneStyle = '生活方式摄影, 电影级光影, 高质量, 8K, 氛围感强, 无水印';
+    const detailStyle = '微距摄影, 极致细节, 纹理清晰, 高质量, 8K, 无水印';
+    const whiteBg = '纯白背景, 摄影棚灯光, 均匀布光';
     const sceneRefPrefix = state.uploadedImageBase64 ? '基于原商品风格的' : '';
     return [
-      { slot: 'main-0', prompt: `${c}${productCn}, 正面平拍, ${whiteBg}, ${baseStyle}` },
-      { slot: 'main-1', prompt: `${c}${productCn}, 45度斜视角, ${whiteBg}, ${baseStyle}` },
-      { slot: 'main-2', prompt: `${c}${productCn}, 侧面视角, ${whiteBg}, ${baseStyle}` },
-      { slot: 'main-3', prompt: `${c}${productCn}, 俯视角度, ${whiteBg}, ${baseStyle}` },
-      { slot: 'main-4', prompt: `${c}${productCn}, 背面视角, ${whiteBg}, ${baseStyle}` },
-      { slot: 'scene-0', prompt: `${sceneRefPrefix}${c}${productCn}, 户外自然场景, 与原商品一致的光影风格, 生活方式摄影, 产品与环境和谐融合, ${baseStyle}` },
-      { slot: 'scene-1', prompt: `${sceneRefPrefix}${c}${productCn}, 现代简约室内场景, 暖色调柔光, 与原商品一致的风格, 生活方式摄影, ${baseStyle}` },
-      { slot: 'scene-2', prompt: `${sceneRefPrefix}${c}${productCn}, 专业工作室场景, 戏剧性光影, 与原商品一致的风格, 高级质感, ${baseStyle}` },
-      { slot: 'detail-0', prompt: `${c}${productCn} 材质表面微距特写, 清晰可见纹理与材质细节, 微距摄影, ${whiteBg}, ${baseStyle}` },
-      { slot: 'detail-1', prompt: `${c}${productCn} 工艺细节特写, 清晰展示缝线与做工, 微距摄影, ${whiteBg}, ${baseStyle}` },
-      { slot: 'hero', prompt: `${c}${productCn}, 极具质感的产品大图, ${whiteBg}, 顶级电商主图, ${baseStyle}` },
+      { slot: 'main-0', prompt: `${c}${productCn}, 正面平拍, ${whiteBg}, ${mainStyle}` },
+      { slot: 'main-1', prompt: `${c}${productCn}, 45度斜视角, ${whiteBg}, ${mainStyle}` },
+      { slot: 'main-2', prompt: `${c}${productCn}, 侧面视角, ${whiteBg}, ${mainStyle}` },
+      { slot: 'main-3', prompt: `${c}${productCn}, 俯视角度, ${whiteBg}, ${mainStyle}` },
+      { slot: 'main-4', prompt: `${c}${productCn}, 背面视角, ${whiteBg}, ${mainStyle}` },
+      // 场景图: 换背景 - 城市户外
+      { slot: 'scene-0', prompt: `${sceneRefPrefix}${c}${productCn}, 放置在繁华都市天台场景, 夕阳金色逆光, 背景是城市天际线, 产品与场景完美融合, 景深虚化, ${sceneStyle}` },
+      // 场景图: 换背景 - 自然户外
+      { slot: 'scene-1', prompt: `${sceneRefPrefix}${c}${productCn}, 放置在热带海滩场景, 蓝天白云, 沙滩椰树, 自然光照射, 度假氛围, 产品与场景完美融合, ${sceneStyle}` },
+      // 场景图: 棚拍渲染 - 专业影棚
+      { slot: 'scene-2', prompt: `${sceneRefPrefix}${c}${productCn}, 顶级商业影棚拍摄, 专业柔光箱布光, 渐变灰背景, 产品表面反射柔和高光, 边缘光勾勒轮廓, 广告级棚拍质感, 无背景杂物, ${sceneStyle}` },
+      { slot: 'detail-0', prompt: `${c}${productCn} 材质表面微距特写, 清晰可见纹理与材质细节, 专业侧光突出质感, ${detailStyle}` },
+      { slot: 'detail-1', prompt: `${c}${productCn} 工艺细节特写, 清晰展示缝线与做工, 微距景深效果, ${detailStyle}` },
+      { slot: 'hero', prompt: `${c}${productCn}, 极具质感的产品大图, ${whiteBg}, 顶级电商主图, ${mainStyle}` },
     ];
   }
 
@@ -1323,21 +1377,26 @@ function makeAssetPrompts(type, color, edits) {
   const productEn = {
     shoe: 'shoe', bag: 'bag', bottle: 'bottle', chair: 'chair', jewelry: 'jewelry',
   }[type] || 'product';
-  const baseStyle = 'e-commerce product photography, clean minimal style, high quality, 8K, sharp and clear, no watermark';
-  const whiteBg = 'pure white background, studio lighting';
+  const mainStyle = 'e-commerce product photography, clean minimal style, high quality, 8K, sharp and clear, no watermark';
+  const sceneStyle = 'lifestyle photography, cinematic lighting, high quality, 8K, strong atmosphere, no watermark';
+  const detailStyle = 'macro photography, extreme detail, clear texture, high quality, 8K, no watermark';
+  const whiteBg = 'pure white background, studio lighting, even illumination';
   const sceneRefPrefix = state.uploadedImageBase64 ? 'Matching original product style, ' : '';
   return [
-    { slot: 'main-0', prompt: `${colorEn} ${productEn}, front view flat lay, ${whiteBg}, ${baseStyle}` },
-    { slot: 'main-1', prompt: `${colorEn} ${productEn}, 45 degree angle, ${whiteBg}, ${baseStyle}` },
-    { slot: 'main-2', prompt: `${colorEn} ${productEn}, side view, ${whiteBg}, ${baseStyle}` },
-    { slot: 'main-3', prompt: `${colorEn} ${productEn}, top down view, ${whiteBg}, ${baseStyle}` },
-    { slot: 'main-4', prompt: `${colorEn} ${productEn}, back view, ${whiteBg}, ${baseStyle}` },
-    { slot: 'scene-0', prompt: `${sceneRefPrefix}${colorEn} ${productEn}, outdoor natural setting, matching product lighting style, lifestyle photography, product harmoniously blended with environment, ${baseStyle}` },
-    { slot: 'scene-1', prompt: `${sceneRefPrefix}${colorEn} ${productEn}, modern minimalist indoor scene, warm soft lighting, matching original style, lifestyle photography, ${baseStyle}` },
-    { slot: 'scene-2', prompt: `${sceneRefPrefix}${colorEn} ${productEn}, professional studio scene, dramatic lighting, matching original style, premium quality, ${baseStyle}` },
-    { slot: 'detail-0', prompt: `${colorEn} ${productEn} material surface macro close-up, clear visible texture and material details, macro photography, ${whiteBg}, ${baseStyle}` },
-    { slot: 'detail-1', prompt: `${colorEn} ${productEn} craftsmanship detail close-up, clear stitching and workmanship, macro photography, ${whiteBg}, ${baseStyle}` },
-    { slot: 'hero', prompt: `${colorEn} ${productEn}, premium product hero shot, ${whiteBg}, top-tier e-commerce main image, ${baseStyle}` },
+    { slot: 'main-0', prompt: `${colorEn} ${productEn}, front view flat lay, ${whiteBg}, ${mainStyle}` },
+    { slot: 'main-1', prompt: `${colorEn} ${productEn}, 45 degree angle, ${whiteBg}, ${mainStyle}` },
+    { slot: 'main-2', prompt: `${colorEn} ${productEn}, side view, ${whiteBg}, ${mainStyle}` },
+    { slot: 'main-3', prompt: `${colorEn} ${productEn}, top down view, ${whiteBg}, ${mainStyle}` },
+    { slot: 'main-4', prompt: `${colorEn} ${productEn}, back view, ${whiteBg}, ${mainStyle}` },
+    // Scene: city rooftop
+    { slot: 'scene-0', prompt: `${sceneRefPrefix}${colorEn} ${productEn}, placed on a bustling city rooftop, golden hour backlight, city skyline in background, product perfectly blended with scene, depth of field bokeh, ${sceneStyle}` },
+    // Scene: tropical beach
+    { slot: 'scene-1', prompt: `${sceneRefPrefix}${colorEn} ${productEn}, placed on tropical beach scene, blue sky white clouds, sand and palm trees, natural sunlight, vacation vibe, product perfectly blended with scene, ${sceneStyle}` },
+    // Scene: professional studio
+    { slot: 'scene-2', prompt: `${sceneRefPrefix}${colorEn} ${productEn}, top-tier commercial studio shoot, professional softbox lighting, gradient gray background, soft highlight reflection on product surface, rim light outlining contour, advertising-grade studio quality, no clutter in background, ${sceneStyle}` },
+    { slot: 'detail-0', prompt: `${colorEn} ${productEn} material surface macro close-up, clear visible texture and material details, professional side light emphasizing texture, ${detailStyle}` },
+    { slot: 'detail-1', prompt: `${colorEn} ${productEn} craftsmanship detail close-up, clear stitching and workmanship, macro depth of field effect, ${detailStyle}` },
+    { slot: 'hero', prompt: `${colorEn} ${productEn}, premium product hero shot, ${whiteBg}, top-tier e-commerce main image, ${mainStyle}` },
   ];
 }
 
@@ -1366,7 +1425,7 @@ async function startTripoTask(prompt) {
   return data.output?.task_id;
 }
 
-async function callImageGen(prompt, size = '1024*1024') {
+async function callImageGen(prompt, size = '1280*1280') {
   const r = await fetch('/api/image/generate', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -1374,9 +1433,14 @@ async function callImageGen(prompt, size = '1024*1024') {
   });
   const data = await r.json();
   if (!r.ok || data.code) {
-    throw new Error(`Z-Image 失败: ${data.code || r.status} ${data.message || ''}`);
+    throw new Error(`图片生成失败: ${data.code || r.status} ${data.message || ''}`);
   }
-  // 解析: output.choices[0].message.content[0].image
+  // 兼容万相 2.7: output.results[0].url
+  const results = data.output?.results;
+  if (results && results.length > 0) {
+    return results[0]?.url || null;
+  }
+  // 兼容旧版 Z-Image: output.choices[0].message.content[0].image
   const content = data.output?.choices?.[0]?.message?.content || [];
   const imgItem = content.find(c => c.image);
   return imgItem?.image || null;
@@ -1666,7 +1730,7 @@ function loadGLBIntoScene(url) {
       hideThreeLoading();
       toast('3D 模型加载完成');
 
-      // GLB 加载完成 → 从三维模型渲染套图(覆盖 Z-Image 结果,保证跟商品一致)
+      // GLB 加载完成 → 从三维模型渲染套图(覆盖万相2.7 结果,保证跟商品一致)
       setTimeout(() => {
         captureAllThreeAssets();
         // 刷新资产网格和详情图
@@ -1720,7 +1784,7 @@ function updateEditorState() {
 }
 
 // ============ Three.js → 商品套图截图 ============
-// 用三维模型渲染代替 Z-Image 生成商品图,确保图片跟上传的商品一致
+// 用三维模型渲染代替万相2.7 生成商品图,确保图片跟上传的商品一致
 const THREE_CAPTURE_ANGLES = {
   'main-0':  { pos: [0, 1.0, 4.0],   label: '正面' },
   'main-1':  { pos: [3.0, 1.5, 3.0], label: '45°' },
@@ -2178,13 +2242,9 @@ function renderAssetGrid(tab) {
     card.className = 'asset-card';
     card.style.animationDelay = (idx * 40) + 'ms';
     card.innerHTML = makeAssetSVG(item, state.productType, tab, idx);
-    // 细节图点击放大查看，其他直接下载
-    if (tab === 'detail') {
-      card.addEventListener('click', () => openLightbox(item, state.productType, tab, idx));
-      card.style.cursor = 'zoom-in';
-    } else {
-      card.addEventListener('click', () => downloadAssetCard(item, state.productType, tab, idx));
-    }
+    // 点击放大查看
+    card.addEventListener('click', () => openLightbox(item, state.productType, tab, idx));
+    card.style.cursor = 'zoom-in';
     grid.appendChild(card);
   });
   $('asset-count').textContent = items.length + ' 张';
@@ -2207,7 +2267,7 @@ function makeAssetSVG(item, type, category, idx) {
   const fill = isGradient ? `url(#${gradId})` : rawBg;
 
   // Use real image if available for this slot
-  // 上传图片后,3D 渲染完成前不显示 Z-Image 结果,显示 loading
+  // 上传图片后,3D 渲染完成前不显示万相2.7 结果,显示 loading
   const realKey = `${category}-${idx}`;
   const realUrl = realAssetOrNull(state.realAssets[realKey]);
 
@@ -2832,6 +2892,7 @@ function openLightbox(item, type, tab, idx) {
       <button class="lb-close" title="关闭">×</button>
       <div class="lb-image-wrap"></div>
       <div class="lb-label"></div>
+      <button class="lb-download" title="下载">⬇ 下载</button>
     </div>
   `;
   document.body.appendChild(overlay);
@@ -2840,24 +2901,32 @@ function openLightbox(item, type, tab, idx) {
   const svg = makeAssetSVG(item, type, tab, idx);
   const wrap = overlay.querySelector('.lb-image-wrap');
   const label = overlay.querySelector('.lb-label');
-  label.textContent = item.label + ' · 点击查看材质细节';
+  label.textContent = item.label;
 
+  let blobUrl = null;
   // 使用 blob URL 显示高清图
   svgToBlob(svg, 1200, 1200).then(blob => {
-    const url = URL.createObjectURL(blob);
+    blobUrl = URL.createObjectURL(blob);
     const img = document.createElement('img');
-    img.src = url;
+    img.src = blobUrl;
     img.alt = item.label;
     wrap.appendChild(img);
-    // 清理
-    overlay.addEventListener('remove', () => URL.revokeObjectURL(url), { once: true });
   });
 
   // 关闭逻辑
-  const close = () => overlay.remove();
+  const close = () => {
+    if (blobUrl) URL.revokeObjectURL(blobUrl);
+    overlay.remove();
+  };
   overlay.querySelector('.lb-close').addEventListener('click', close);
   overlay.querySelector('.lb-backdrop').addEventListener('click', close);
   overlay.addEventListener('keydown', (e) => { if (e.key === 'Escape') close(); });
+
+  // 下载逻辑
+  overlay.querySelector('.lb-download').addEventListener('click', () => {
+    downloadAssetCard(item, type, tab, idx);
+  });
+
   overlay.focus();
 }
 

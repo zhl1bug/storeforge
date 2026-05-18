@@ -1218,6 +1218,21 @@ main {
   font-size: 13px;
   letter-spacing: 1px;
 }
+.lb-download {
+  padding: 8px 20px;
+  border-radius: 8px;
+  border: 1px solid rgba(255,255,255,0.3);
+  background: rgba(255,255,255,0.12);
+  color: #fff;
+  font-size: 13px;
+  cursor: pointer;
+  transition: all 0.2s;
+  margin-top: 4px;
+}
+.lb-download:hover {
+  background: var(--accent);
+  border-color: var(--accent);
+}
 
 @media (max-width: 900px) {
   .result-grid { grid-template-columns: 1fr; }

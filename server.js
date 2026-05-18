@@ -70,6 +70,7 @@ const MIME = {
 
 const TRIPO_URL  = 'https://dashscope.aliyuncs.com/api/v1/services/aigc/video-generation/3d-generation';
 const ZIMAGE_URL = 'https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation';
+const WAN_IMAGE_MODEL = 'wan2.7-image';  // 万相 2.7 标准版 (可选 wan2.7-image-pro 专业版)
 const TASK_URL   = (id) => `https://dashscope.aliyuncs.com/api/v1/tasks/${id}`;
 
 function readBody(req) {
@@ -135,24 +136,29 @@ async function handleApi(req, res, pathname) {
       return;
     }
 
-    // POST /api/image/generate  — 启动文生图任务 (Z-Image / 同步返回)
+    // POST /api/image/generate  — 启动文生图任务 (万相 2.7 / 同步返回)
     if (pathname === '/api/image/generate' && req.method === 'POST') {
       const body = JSON.parse(await readBody(req) || '{}');
       const prompt = body.prompt || '';
-      const size = body.size || '1024*1024';
+      const size = body.size || '1280*1280';
       const n = body.n || 1;
       const r = await callDashScope({
         url: ZIMAGE_URL,
-        // multimodal-generation 端点是同步返回的,不要加 X-DashScope-Async
         async: false,
         body: {
-          model: body.model || 'z-image-turbo',
+          model: body.model || WAN_IMAGE_MODEL,
           input: {
             messages: [
               { role: 'user', content: [{ text: prompt }] },
             ],
           },
-          parameters: { n, size, watermark: false, ...(body.parameters || {}) },
+          parameters: {
+            n,
+            size,
+            watermark: false,
+            negative_prompt: body.negative_prompt || '',
+            ...(body.parameters || {}),
+          },
         },
       });
       res.writeHead(r.status);
